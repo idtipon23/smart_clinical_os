@@ -41,6 +41,8 @@ and other identifying details before sending. AI output is advisory, is not
 saved automatically, and must be reviewed by a clinician.
 Use real patient information only where the clinic has approved this external
 processing and applicable privacy requirements are met.
+In the app, open **ปรึกษา Gemini (การแพทย์ทั่วไป)**, select a patient, enter
+the consultation details, and choose **ส่งปรึกษา Gemini 3.5 Flash Lite**.
 
 This codebase expects the existing table/view names and columns used by its
 repositories, including `patients`, `vital_signs`, `cdss_events`, and

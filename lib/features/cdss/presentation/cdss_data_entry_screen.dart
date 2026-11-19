@@ -171,9 +171,10 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
   }
 
   Future<void> _requestGeminiRecommendation() async {
-    if (_selectedPatient == null || _cdssResult == null || _isGeminiLoading) {
+    if (_selectedPatient == null || _isGeminiLoading) {
       return;
     }
+    if (_cdssResult == null) _evaluateCdss();
 
     final confirmed = await showDialog<bool>(
       context: context,
@@ -490,6 +491,24 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
                     ),
                   ),
                   const SizedBox(height: 20),
+                  OutlinedButton.icon(
+                    onPressed: _selectedPatient == null || _isGeminiLoading
+                        ? null
+                        : _requestGeminiRecommendation,
+                    icon: _isGeminiLoading
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.auto_awesome_rounded, size: 18),
+                    label: Text(
+                      _isGeminiLoading
+                          ? 'กำลังขอคำแนะนำ...'
+                          : 'ส่งปรึกษา Gemini 3.5 Flash Lite',
+                    ),
+                  ),
+                  const SizedBox(height: 12),
 
                   // Step 3: แสดงผลลัพธ์คำแนะนำ CDSS
                   if (_cdssResult != null) _buildCdssResultCard(),
@@ -972,22 +991,6 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
                   ),
                 ],
               ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          OutlinedButton.icon(
-            onPressed: _isGeminiLoading ? null : _requestGeminiRecommendation,
-            icon: _isGeminiLoading
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.auto_awesome_rounded, size: 18),
-            label: Text(
-              _isGeminiLoading
-                  ? 'กำลังขอคำแนะนำ...'
-                  : 'ขอคำแนะนำจาก Gemini 3.5 Flash Lite',
             ),
           ),
           if (_geminiRecommendation != null) ...[

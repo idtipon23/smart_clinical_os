@@ -35,7 +35,7 @@ class _AppShellState extends ConsumerState<AppShell> {
     (label: 'ภาพรวม (Command Center)', icon: Icons.dashboard_rounded),          // Index 0
     (label: 'คัดกรองด่วน (Urgent Triage)', icon: Icons.flash_on_rounded),         // Index 1
     (label: 'ทะเบียนผู้ป่วย (Registry)', icon: Icons.groups_rounded),              // Index 2
-    (label: 'ปรึกษาทางการแพทย์ทั่วไป', icon: Icons.assignment_rounded),          // Index 3
+    (label: 'ปรึกษา Gemini (การแพทย์ทั่วไป)', icon: Icons.auto_awesome_rounded), // Index 3
     (label: 'ภาพรวมสุขภาพและสถิติ', icon: Icons.bar_chart_rounded),               // Index 4
     (label: 'คุณภาพเวชระเบียน & Audit', icon: Icons.verified_user_rounded),       // Index 5
     (label: 'จัดการยา-นัดหมาย', icon: Icons.event_note_rounded),                   // Index 6
