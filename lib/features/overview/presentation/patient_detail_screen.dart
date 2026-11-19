@@ -1,0 +1,2665 @@
+// lib/features/overview/presentation/patient_detail_screen.dart
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+import '../../../core/utils/lab_field_resolver.dart';
+import 'widgets/lab_history_comparison_dialog.dart';
+import '../../triage/domain/risk_stratification_rules.dart';
+import '../../../core/constants/clinical_theme.dart';
+import '../../../screens/patient_clinical_recommendation_sheet.dart';
+import '../../../services/ht_cdss_engine.dart';
+import '../../triage/domain/care_gap_rules.dart';
+import '../../triage/domain/triage_rules.dart';
+import '../data/triage_repository.dart';
+import '../../triage/domain/medication_safety_rules.dart';
+import '../data/opd_visit_repository.dart';
+import 'widgets/clinical_record_entry_dialog.dart';
+import 'widgets/opd_encounter_dialog.dart';
+import 'widgets/patient_delete_confirm_dialog.dart';
+import 'widgets/opd_visit_history_view.dart';
+
+class PatientDetailScreen extends ConsumerStatefulWidget {
+  final String patientId;
+
+  const PatientDetailScreen({super.key, required this.patientId});
+
+  @override
+  ConsumerState<PatientDetailScreen> createState() =>
+      _PatientDetailScreenState();
+}
+
+class _PatientDetailScreenState extends ConsumerState<PatientDetailScreen>
+    with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+  final _noteController = TextEditingController();
+  bool _isSaving = false;
+  bool _sendToLine = true;
+
+  final List<String> _quickPresets = [
+    'ช่วงนี้ความดันตัวบนสูงกว่าปกติ แนะนำพักผ่อนให้เพียงพอและวัดซ้ำพรุ่งนี้เช้า',
+    'ตรวจพบโซเดียมในมื้ออาหารสะสมสูง แนะนำหลีกเลี่ยงแกงกะทิและน้ำซุป',
+    'ไม่พบบันทึกการทานยาต่อเนื่อง กรุณาทานยาตามที่แพทย์สั่งอย่างสม่ำเสมอ',
+    'ความดันอยู่ในเกณฑ์ควบคุมได้ดีมาก ขอให้ปฏิบัติตัวต่อเนื่องครับ/ค่ะ',
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 3, vsync: this);
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    _noteController.dispose();
+    super.dispose();
+  }
+
+  // lib/features/overview/presentation/patient_detail_screen.dart
+  // (แทนที่ฟังก์ชัน _openClinicalRecommendations และเพิ่ม _showAcuteTodScreeningDialog)
+
+  /// กล่องข้อความคัดกรอง Red Flags เมื่อพบความดันวิกฤต (BP >= 180/110 mmHg)
+  Future<bool> _showAcuteTodScreeningDialog(int sbp, int dbp) async {
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: const [
+            Icon(
+              Icons.warning_amber_rounded,
+              color: ClinicalColors.criticalRed,
+              size: 24,
+            ),
+            SizedBox(width: 8),
+            Text(
+              'คัดกรองภาวะวิกฤตฉุกเฉิน (Hypertensive Crisis)',
+              style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: ClinicalColors.criticalBg,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                'ระดับความดันล่าสุด: $sbp/$dbp mmHg',
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: ClinicalColors.criticalRed,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'ผู้ป่วยมีอาการเตือนของภาวะอวัยวะเป้าหมายถูกทำลายเฉียบพลัน (Acute Target-Organ Damage) หรือไม่?',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              '• เจ็บแน่นหน้าอกรุนแรง / ปวดร้าวไปกรามหรือหลัง (ACS / Aortic Dissection)\n'
+              '• หอบเหนื่อย นอนราบไม่ได้ (Acute Pulmonary Edema)\n'
+              '• แขนขาอ่อนแรง ปากเบี้ยว สับสน ชัก หมดสติ (Acute Stroke / Encephalopathy)\n'
+              '• ตามัวมองไม่เห็นเฉียบพลัน (Papilledema)',
+              style: TextStyle(
+                fontSize: 12,
+                color: ClinicalColors.textPrimary,
+                height: 1.4,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          OutlinedButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('ไม่มีอาการ (Hypertensive Urgency)'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: ClinicalColors.criticalRed,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('มีอาการ (Hypertensive Emergency)'),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
+  }
+
+  Future<void> _openClinicalRecommendations(
+    Map<String, dynamic> patient,
+    List<Map<String, dynamic>> vitals,
+    Map<String, dynamic>? latestLab,
+  ) async {
+    final String targetPatientId =
+        patient['id']?.toString() ?? widget.patientId;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const Center(
+        child: CircularProgressIndicator(color: ClinicalColors.primaryEmerald),
+      ),
+    );
+
+    List<String> realMedClasses = [];
+    int realMedCount = 0;
+    double? baselineCreatinine;
+
+    try {
+      final repository = ref.read(triageRepositoryProvider);
+      final cdssData = await Future.wait<dynamic>([
+        repository.fetchPatientMedicationClasses(targetPatientId),
+        repository.fetchBaselineCreatinine(targetPatientId),
+      ]);
+      realMedClasses = cdssData[0] as List<String>;
+      realMedCount = realMedClasses.length;
+      baselineCreatinine = cdssData[1] as double;
+    } catch (e) {
+      debugPrint('❌ Error fetching data for CDSS: $e');
+    } finally {
+      if (mounted) Navigator.of(context, rootNavigator: true).pop();
+    }
+    // 1. 🔒 Clinical Safety Guard: ดึงสัญญาณชีพจริง ไม่ใส่ค่าสมมุติ (0 = Insufficient Vitals)
+    final latestVital = vitals.isNotEmpty ? vitals.first : <String, dynamic>{};
+    final int officeSbp = (latestVital['systolic'] as num?)?.toInt() ?? 0;
+    final int officeDbp = (latestVital['diastolic'] as num?)?.toInt() ?? 0;
+    final int heartRate = (latestVital['pulse'] as num?)?.toInt() ?? 0;
+
+    // 2. ดึงข้อมูลประวัติโรคร่วมตามบันทึกเวชระเบียน
+    final underlying = (patient['underlying_diseases'] ?? '')
+        .toString()
+        .toLowerCase();
+    final bool hasDm =
+        underlying.contains('เบาหวาน') ||
+        underlying.contains('dm') ||
+        (labNum(latestLab, 'fbs') ?? 0) >= 126.0 ||
+        ((latestLab?['hba1c'] as num?)?.toDouble() ?? 0) >= 6.5;
+
+    final bool hasCvd =
+        underlying.contains('หัวใจ') ||
+        underlying.contains('หลอดเลือด') ||
+        patient['has_cvd'] == true;
+    final bool hasCad =
+        underlying.contains('หลอดเลือดหัวใจ') ||
+        underlying.contains('cad') ||
+        patient['has_cad'] == true;
+    final bool hasHf =
+        underlying.contains('หัวใจล้มเหลว') ||
+        underlying.contains('hf') ||
+        patient['has_heart_failure'] == true;
+    final bool hasProteinuria =
+        underlying.contains('โปรตีนรั่ว') || patient['has_proteinuria'] == true;
+    final bool hasGout =
+        underlying.contains('เกาต์') ||
+        underlying.contains('gout') ||
+        patient['has_gout'] == true;
+    final bool hasOsa =
+        underlying.contains('osa') ||
+        underlying.contains('นอนกรน') ||
+        patient['has_osa'] == true;
+    final bool isPregnant =
+        patient['is_pregnant'] == true || underlying.contains('ตั้งครรภ์');
+    final bool isSmoker =
+        patient['smokes'] == true || patient['smokers'] == true;
+
+    // 3. 🔒 Zero Assumption Lab Extraction: ปล่อยเป็น Null หากไม่มีผลตรวจจริง
+    final double? egfr = (latestLab?['egfr'] as num?)?.toDouble();
+    final double? potassium = (latestLab?['potassium'] as num?)?.toDouble();
+    final double? sodium = (latestLab?['sodium'] as num?)?.toDouble();
+    final double? uricAcid = (latestLab?['uric_acid'] as num?)?.toDouble();
+    final double? currentCreatinine = (latestLab?['creatinine'] as num?)
+        ?.toDouble();
+    final double? totalChol = labNum(latestLab, 'cholesterol');
+
+    // 4. คำนวณ Internal Screening Priority Score (Non-validated heuristic)
+    final int age = (patient['age'] as num?)?.toInt() ?? 0;
+    double calculatedCvRisk = 4.0;
+    if (hasCvd || hasCad || hasHf) {
+      calculatedCvRisk = 25.0;
+    } else {
+      if (age >= 60) calculatedCvRisk += 6.0;
+      if (isSmoker) calculatedCvRisk += 4.0;
+      if (hasDm) calculatedCvRisk += 5.0;
+      if (officeSbp >= 160) {
+        calculatedCvRisk += 6.0;
+      } else if (officeSbp >= 140) {
+        calculatedCvRisk += 3.0;
+      }
+      if (totalChol != null && totalChol >= 240) {
+        calculatedCvRisk += 4.0;
+      } else if (totalChol != null && totalChol >= 200) {
+        calculatedCvRisk += 2.0;
+      }
+    }
+
+    // 5. 🔒 ตรวจสอบภาวะ Acute Target-Organ Damage เมื่อพบความดัน >= 180/110 mmHg
+    bool hasAcuteTod = false;
+    if (officeSbp >= 180 || officeDbp >= 110) {
+      if (mounted) {
+        hasAcuteTod = await _showAcuteTodScreeningDialog(officeSbp, officeDbp);
+      }
+    }
+
+    // 6. ประกอบอินพุตเข้าสู่ HtPatientData
+    final patientData = HtPatientData(
+      age: age,
+      sex: patient['gender'] ?? 'ไม่ระบุ',
+      officeSbp: officeSbp,
+      officeDbp: officeDbp,
+      homeSbp: (patient['home_sbp'] as num?)?.toInt(),
+      homeDbp: (patient['home_dbp'] as num?)?.toInt(),
+      heartRate: heartRate,
+      hasCvd: hasCvd,
+      hasDm: hasDm,
+      cvRiskScore: calculatedCvRisk,
+      hasHmod: patient['has_hmod'] == true,
+      egfr: egfr,
+      potassium: potassium,
+      serumSodium: sodium,
+      serumUricAcid: uricAcid,
+      baselineCreatinine: baselineCreatinine,
+      currentCreatinine: currentCreatinine,
+      isFrail: patient['is_frail'] == true,
+      hasHighNocturnalBp: patient['has_high_nocturnal_bp'] == true,
+      medCount: realMedCount,
+      currentMedClasses: realMedClasses,
+      isMaxToleratedDose: patient['is_max_tolerated_dose'] == true,
+      historyHighBp: vitals.length > 1,
+      visitCount: vitals.length,
+      hasPersistentLowDbp: TriageRules.checkPersistentLowDbp(vitals),
+      hasCad: hasCad,
+      hasHeartFailure: hasHf,
+      hasProteinuria: hasProteinuria,
+      hasGout: hasGout,
+      isPregnant: isPregnant,
+      hasSleepApnea: hasOsa,
+      hasClassicPheoTriad: patient['has_pheo_triad'] == true,
+      hasAcuteTargetOrganDamage: hasAcuteTod,
+    );
+
+    // 7. ประมวลผลผ่าน HtCdssEngine
+    final result = HtCdssEngine.evaluate(patientData);
+
+    // 8. แสดง Modal พร้อมการบันทึก CDSS Audit Provenance
+    if (mounted) {
+      showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        builder: (ctx) => FractionallySizedBox(
+          heightFactor: 0.90,
+          child: PatientClinicalRecommendationSheet(
+            patient: patient,
+            patientData: patientData,
+            result: result,
+            onApplyToNote: (choiceText) {
+              setState(() {
+                _noteController.text = choiceText;
+              });
+            },
+            onDecision:
+                ({
+                  required String action,
+                  required String recommendationText,
+                  String? overrideReason,
+                }) async {
+                  try {
+                    final bool isLabComplete =
+                        egfr != null && potassium != null;
+
+                    await ref
+                        .read(triageRepositoryProvider)
+                        .logCdssEvent(
+                          patientId: targetPatientId,
+                          ruleId: 'TH_HT_CDSS_2024',
+                          ruleVersion: 'TH-HT-2024.2',
+                          severity: result.safetyAlerts.isNotEmpty
+                              ? 'CRITICAL'
+                              : 'ROUTINE',
+                          inputSnapshot: {
+                            'sbp': patientData.officeSbp,
+                            'dbp': patientData.officeDbp,
+                            'hr': patientData.heartRate,
+                            'egfr': patientData.egfr,
+                            'potassium': patientData.potassium,
+                            'sodium': patientData.serumSodium,
+                            'creatinine': patientData.currentCreatinine,
+                            'baseline_creatinine':
+                                patientData.baselineCreatinine,
+                            'med_count': patientData.medCount,
+                            'med_classes': patientData.currentMedClasses,
+                            'has_acute_tod':
+                                patientData.hasAcuteTargetOrganDamage,
+                            'data_quality_status': isLabComplete
+                                ? 'COMPLETE'
+                                : 'INSUFFICIENT_LAB_DATA',
+                          },
+                          recommendation: {
+                            'diagnosis': result.diagnosisEvaluation,
+                            'selected_recommendation': recommendationText,
+                            'target_office': result.bpTargetOffice,
+                            'missing_lab_alerts': result.missingLabAlerts,
+                            'safety_alerts': result.safetyAlerts,
+                          },
+                          staffAction: action,
+                          overrideReason: overrideReason,
+                        );
+                    ref.invalidate(patientTimelineProvider(widget.patientId));
+                  } catch (e) {
+                    debugPrint('❌ Error logging CDSS audit event: $e');
+                  }
+                },
+          ),
+        ),
+      );
+    }
+  }
+
+  /// การ์ดแสดงผลการประเมินความเสี่ยงพหุมิติพร้อมเหตุผลประกอบ (Explainable Risk Card)
+  Widget _buildRiskStratificationBanner(PatientRiskAssessment risk) {
+    Color bg;
+    Color border;
+    Color badgeBg;
+    Color textColor;
+    String label;
+    IconData icon;
+
+    switch (risk.level) {
+      case ClinicalRiskLevel.high:
+        bg = const Color(0xFFFEF2F2);
+        border = const Color(0xFFFCA5A5);
+        badgeBg = ClinicalColors.criticalRed;
+        textColor = const Color(0xFF991B1B);
+        label = 'ความเสี่ยงสูง (HIGH CLINICAL RISK)';
+        icon = Icons.warning_rounded;
+        break;
+      case ClinicalRiskLevel.moderate:
+        bg = const Color(0xFFFFFBEB);
+        border = const Color(0xFFFCD34D);
+        badgeBg = const Color(0xFFD97706);
+        textColor = const Color(0xFF92400E);
+        label = 'ความเสี่ยงปานกลาง (MODERATE RISK)';
+        icon = Icons.info_rounded;
+        break;
+      case ClinicalRiskLevel.low:
+        bg = const Color(0xFFF0FDF4);
+        border = const Color(0xFFBBF7D0);
+        badgeBg = ClinicalColors.primaryEmerald;
+        textColor = const Color(0xFF166534);
+        label = 'ความเสี่ยงต่ำ / ควบคุมได้ดี (LOW RISK)';
+        icon = Icons.check_circle_rounded;
+        break;
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: border, width: 1.2),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Icon(icon, color: badgeBg, size: 20),
+                  const SizedBox(width: 8),
+                  Text(
+                    'การประเมินความเสี่ยงพหุมิติ: ',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                      color: textColor,
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 3,
+                    ),
+                    decoration: BoxDecoration(
+                      color: badgeBg,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      label,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              Text(
+                'Clinical Score: ${risk.riskScore}/100',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: textColor,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            '📌 ปัจจัยบ่งชี้ความเสี่ยง (Clinical Evidence):',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              color: textColor,
+            ),
+          ),
+          const SizedBox(height: 4),
+          ...risk.primaryReasons.map(
+            (r) => Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '• ',
+                    style: TextStyle(
+                      color: textColor,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  Expanded(
+                    child: Text(
+                      r,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: textColor,
+                        height: 1.3,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.6),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.lightbulb_outline_rounded, size: 16, color: badgeBg),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    risk.clinicalRecommendation,
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w600,
+                      color: textColor,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOverTreatmentBanner(List<Map<String, dynamic>> vitals) {
+    final latestVital = vitals.isNotEmpty ? vitals.first : <String, dynamic>{};
+    final int sbp = (latestVital['systolic'] as num?)?.toInt() ?? 0;
+    final int dbp = (latestVital['diastolic'] as num?)?.toInt() ?? 0;
+
+    final bool isHypo = (sbp > 0 && sbp < 100) || (dbp > 0 && dbp < 60);
+    final bool isPersistentLowDbp = TriageRules.checkPersistentLowDbp(vitals);
+    final bool isExcessiveDbpLowering = dbp > 0 && dbp < 70 && sbp >= 140;
+
+    if (!isHypo && !isPersistentLowDbp && !isExcessiveDbpLowering) {
+      return const SizedBox.shrink();
+    }
+
+    String title = '';
+    String description = '';
+
+    if (isHypo) {
+      title = '🚨 แจ้งเตือน: ผู้ป่วยมีความดันโลหิตต่ำกว่าเกณฑ์ (< 100/60 mmHg)';
+      description = 'เสี่ยงต่อภาวะหน้ามืด วิงเวียน หรือหกล้ม แนะนำแพทย์พิจารณาปรับลดขนาดยา (Step-down) หรือหยุดยา 1 ชนิดชั่วคราว';
+    } else if (isPersistentLowDbp) {
+      title = '🚨 แจ้งเตือน Over-treatment: ตรวจพบ DBP < 70 mmHg ต่อเนื่อง 3 วันขึ้นไป';
+      description = 'ผู้ป่วยได้รับยาลดความดันอยู่และมี DBP ต่ำต่อเนื่อง เสี่ยงต่อกล้ามเนื้อหัวใจขาดเลือด (J-Curve) แนะนำแพทย์พิจารณาปรับลดขนาดยา (De-escalation)';
+    } else if (isExcessiveDbpLowering) {
+      title =
+          '⚠️ ข้อควรระวัง: DBP ต่ำกว่า 70 mmHg ขณะที่ SBP ยังสูง (≥ 140 mmHg)';
+      description = 'ภาวะ Isolated Systolic HT ที่ DBP ลดต่ำเกินไป ให้ปรับยาด้วยความระมัดระวังเป็นพิเศษ และห้ามตั้งเป้าหมาย DBP < 70 mmHg';
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFEF2F2),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFF87171), width: 1.5),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(
+            Icons.warning_amber_rounded,
+            color: Color(0xFFDC2626),
+            size: 26,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Color(0xFF991B1B),
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  description,
+                  style: const TextStyle(
+                    color: Color(0xFFB91C1C),
+                    fontSize: 12,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// การ์ดแสดงผลช่องว่างการดูแลที่ตรวจพบ (Care Gaps Card)
+  Widget _buildCareGapsCard(List<CareGapItem> careGaps) {
+    if (careGaps.isEmpty) {
+      return Container(
+        margin: const EdgeInsets.only(bottom: 24),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF0FDF4),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: const Color(0xFFBBF7D0)),
+        ),
+        child: const Row(
+          children: [
+            Icon(
+              Icons.verified_rounded,
+              color: ClinicalColors.primaryEmerald,
+              size: 24,
+            ),
+            SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'ไม่พบช่องว่างการดูแล (No Care Gaps) — การติดตามครบถ้วนตามเกณฑ์มาตรฐาน',
+                style: TextStyle(
+                  color: Color(0xFF166534),
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 24),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: ClinicalColors.surfaceWhite,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFFED7AA)),
+        boxShadow: ClinicalColors.softShadow,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.assignment_late_rounded,
+                color: Color(0xFFEA580C),
+                size: 22,
+              ),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'ช่องว่างการดูแลที่ต้องดำเนินการ (Actionable Care Gaps)',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF9A3412),
+                  ),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFEDD5),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  '${careGaps.length} ข้อบ่งชี้',
+                  style: const TextStyle(
+                    color: Color(0xFFC2410C),
+                    fontWeight: FontWeight.bold,
+                    fontSize: 11,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          ...careGaps.map((gap) {
+            Color tagBg = const Color(0xFFFEF3C7);
+            Color tagText = const Color(0xFFB45309);
+            if (gap.severity == CareGapSeverity.critical) {
+              tagBg = const Color(0xFFFEE2E2);
+              tagText = ClinicalColors.criticalRed;
+            }
+
+            return Container(
+              margin: const EdgeInsets.only(bottom: 10),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF7ED),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFFFEDD5)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          gap.title,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                            color: Color(0xFF7C2D12),
+                          ),
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: tagBg,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          gap.gapType,
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            color: tagText,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    gap.description,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF9A3412),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '💡 ข้อแนะนำ: ${gap.recommendedAction}',
+                          style: const TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFFC2410C),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          foregroundColor: ClinicalColors.primaryEmerald,
+                          side: const BorderSide(
+                            color: ClinicalColors.primaryEmerald,
+                          ),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                        ),
+                        icon: const Icon(Icons.send_rounded, size: 13),
+                        label: const Text(
+                          'ใช้ข้อความ LINE',
+                          style: TextStyle(fontSize: 11),
+                        ),
+                        onPressed: () {
+                          setState(() {
+                            _noteController.text = gap.defaultLineText;
+                          });
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                'คัดลอกข้อความแนะนำเข้ากล่องส่ง LINE เรียบร้อยแล้ว',
+                              ),
+                              backgroundColor: ClinicalColors.primaryEmerald,
+                              duration: Duration(seconds: 2),
+                            ),
+                          );
+                        },
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMedicationCard(
+    List<Map<String, dynamic>> medications,
+    List<MedicationSafetyAlert> safetyAlerts,
+    bool isLoading,
+  ) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: ClinicalColors.surfaceWhite,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color:
+              safetyAlerts.any(
+                (a) => a.severity == MedicationAlertSeverity.critical,
+              )
+              ? const Color(0xFFFCA5A5)
+              : ClinicalColors.borderLight,
+        ),
+        boxShadow: ClinicalColors.softShadow,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Row(
+                children: [
+                  Icon(
+                    Icons.medication_rounded,
+                    size: 20,
+                    color: ClinicalColors.primaryEmerald,
+                  ),
+                  SizedBox(width: 8),
+                  Text(
+                    'รายการยาปัจจุบัน & การเฝ้าระวัง (Medication Review)',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: ClinicalColors.canvasBg,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  '${medications.length} รายการ',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: ClinicalColors.deepCocoa,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+
+          // แสดงแบนเนอร์แจ้งเตือนความปลอดภัยของยา (ถ้ามี)
+          if (safetyAlerts.isNotEmpty) ...[
+            ...safetyAlerts.map((alert) {
+              final isCritical =
+                  alert.severity == MedicationAlertSeverity.critical;
+              final alertColor = isCritical
+                  ? ClinicalColors.criticalRed
+                  : ClinicalColors.warningOrange;
+              final alertBg = isCritical
+                  ? const Color(0xFFFEF2F2)
+                  : const Color(0xFFFFFBEB);
+              final alertBorder = isCritical
+                  ? const Color(0xFFFCA5A5)
+                  : const Color(0xFFFCD34D);
+
+              return Container(
+                margin: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: alertBg,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: alertBorder),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      alert.title,
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.bold,
+                        color: alertColor,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      alert.description,
+                      style: const TextStyle(
+                        fontSize: 11.5,
+                        color: Color(0xFF4A3833),
+                        height: 1.3,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      '👉 คำแนะนำ: ${alert.recommendation}',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.bold,
+                        color: alertColor,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }),
+            const Divider(height: 16),
+          ],
+
+          // รายการยารายตัวพร้อมเวลาทาน
+          if (medications.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 16.0),
+              child: Center(
+                child: isLoading
+                    ? const CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: ClinicalColors.primaryEmerald,
+                      )
+                    : const Text(
+                        'ไม่มีบันทึกประวัติยาประจำตัว',
+                        style: TextStyle(
+                          color: ClinicalColors.textMuted,
+                          fontSize: 13,
+                        ),
+                      ),
+              ),
+            )
+          else
+            ...medications.map((m) {
+              // โค้ดแสดงผลการ์ดยาคงเดิม
+              final drugName = m['medication_name'] ?? 'ไม่ระบุชื่อยา';
+              final drugClass = MedicationSafetyRules.classifyDrug(drugName);
+              final isMorning = m['is_morning_active'] == true;
+              final isNoon = m['is_noon_active'] == true;
+              final isEvening = m['is_evening_active'] == true;
+              final isBedtime = m['is_bedtime_active'] == true;
+
+              return Container(
+                margin: const EdgeInsets.only(bottom: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
+                decoration: BoxDecoration(
+                  color: ClinicalColors.canvasBg,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            drugName,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 13,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            'กลุ่ม: $drugClass',
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: ClinicalColors.textMuted,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Wrap(
+                      spacing: 4,
+                      children: [
+                        if (isMorning) _buildMealBadge('เช้า'),
+                        if (isNoon) _buildMealBadge('กลางวัน'),
+                        if (isEvening) _buildMealBadge('เย็น'),
+                        if (isBedtime) _buildMealBadge('ก่อนนอน'),
+                      ],
+                    ),
+                  ],
+                ),
+              );
+            }),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMealBadge(String label) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: const Color(0xFFE6F4EA),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: const Color(0xFFCEEAD6)),
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.bold,
+          color: Color(0xFF137333),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final detailAsync = ref.watch(patientDetailProvider(widget.patientId));
+
+    return Scaffold(
+      backgroundColor: ClinicalColors.canvasBg,
+      appBar: AppBar(
+        backgroundColor: ClinicalColors.surfaceWhite,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        title: const Text(
+          'เวชระเบียนผู้ป่วยรายบุคคล (Clinical Workspace & Audit)',
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
+            color: ClinicalColors.textPrimary,
+          ),
+        ),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(49),
+          child: Column(
+            children: [
+              TabBar(
+                controller: _tabController,
+                isScrollable: true,
+                tabAlignment: TabAlignment.start,
+                indicatorColor: ClinicalColors.primaryEmerald,
+                labelColor: ClinicalColors.primaryEmerald,
+                unselectedLabelColor: ClinicalColors.textMuted,
+                tabs: const [
+                  Tab(
+                    icon: Icon(Icons.dashboard_outlined),
+                    text: 'ภาพรวมการดูแล (Workspace)',
+                  ),
+                  Tab(
+                    icon: Icon(Icons.history_edu_outlined),
+                    text: 'ประวัติการตรวจรักษา (OPD Visits)',
+                  ), // 👈 เพิ่มแท็บนี้
+                  Tab(
+                    icon: Icon(Icons.timeline_rounded),
+                    text: 'ประวัติเหตุการณ์ (Clinical Timeline)',
+                  ),
+                ],
+              ),
+              const Divider(height: 1, color: ClinicalColors.borderLight),
+            ],
+          ),
+        ),
+      ),
+      body: detailAsync.when(
+        loading: () => const Center(
+          child: CircularProgressIndicator(
+            color: ClinicalColors.primaryEmerald,
+          ),
+        ),
+        error: (err, _) => Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Text(
+              'ไม่สามารถโหลดข้อมูลผู้ป่วยได้: $err',
+              style: const TextStyle(color: ClinicalColors.criticalRed),
+            ),
+          ),
+        ),
+        data: (data) {
+          List<Map<String, dynamic>> patientAppointments = const [];
+          try {
+            final dyn = data as dynamic;
+            if (dyn.appointments != null) {
+              patientAppointments = List<Map<String, dynamic>>.from(
+                dyn.appointments,
+              );
+            }
+          } catch (_) {}
+
+          final careGaps = CareGapRules.evaluateCareGaps(
+            patient: data.patient,
+            vitals: data.vitalSigns,
+            latestLab: data.latestLab,
+            appointments: patientAppointments,
+          );
+
+          final riskAssessment = RiskStratificationRules.evaluate(
+            patient: data.patient,
+            vitals: data.vitalSigns,
+            latestLab: data.latestLab,
+            appointments: patientAppointments,
+          );
+
+          // 🟢 1. สกัดข้อมูลสัญญาณชีพล่าสุดและชื่อคนไข้สำหรับ OPD Card
+          final patientName =
+              data.patient['name'] ??
+              '${data.patient['first_name'] ?? ''} ${data.patient['last_name'] ?? ''}'
+                  .trim();
+          final latestVital = data.vitalSigns.isNotEmpty
+              ? data.vitalSigns.first
+              : <String, dynamic>{};
+          final latestSbp = (latestVital['systolic'] as num?)?.toInt();
+          final latestDbp = (latestVital['diastolic'] as num?)?.toInt();
+          final latestPulse = (latestVital['pulse'] as num?)?.toInt();
+
+          return SizedBox.expand(
+            child: TabBarView(
+              controller: _tabController,
+              children: [
+                SingleChildScrollView(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _buildPatientHeader(
+                        data.patient,
+                        data.vitalSigns,
+                        data.latestLab,
+                      ),
+                      const SizedBox(height: 16),
+                      _buildRiskStratificationBanner(riskAssessment),
+                      _buildOverTreatmentBanner(data.vitalSigns),
+                      const SizedBox(height: 8),
+                      LayoutBuilder(
+                        builder: (context, constraints) {
+                          final isDesktop = constraints.maxWidth >= 950;
+                          if (isDesktop) {
+                            final leftWidth =
+                                (constraints.maxWidth - 24) * 0.58;
+                            final rightWidth =
+                                (constraints.maxWidth - 24) * 0.42;
+                            return Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                SizedBox(
+                                  width: leftWidth,
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: [
+                                      _buildCareGapsCard(careGaps),
+                                      _buildVitalSignsCard(
+                                        data.vitalSigns,
+                                        data.latestLab,
+                                        data.patient,
+                                      ),
+                                      const SizedBox(height: 24),
+                                      _buildLabCard(data.latestLab),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(width: 24),
+                                SizedBox(
+                                  width: rightWidth,
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: [
+                                      _buildMedicationCard(
+                                        data.medications,
+                                        MedicationSafetyRules.evaluateSafety(
+                                          medications: data.medications,
+                                          latestLab: data.latestLab,
+                                          vitals: data.vitalSigns,
+                                          patient: data.patient,
+                                        ),
+                                        false,
+                                      ),
+                                      const SizedBox(height: 24),
+                                      _buildFoodLogsCard(data.recentFoods),
+                                      const SizedBox(height: 24),
+                                      _buildClinicalActionCard(
+                                        data.staffNotes,
+                                        data.patient['line_user_id'],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            );
+                          } else {
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                _buildCareGapsCard(careGaps),
+                                _buildVitalSignsCard(
+                                  data.vitalSigns,
+                                  data.latestLab,
+                                  data.patient,
+                                ),
+                                const SizedBox(height: 24),
+                                _buildLabCard(data.latestLab),
+                                const SizedBox(height: 24),
+                                _buildMedicationCard(
+                                  data.medications,
+                                  MedicationSafetyRules.evaluateSafety(
+                                    medications: data.medications,
+                                    latestLab: data.latestLab,
+                                    vitals: data.vitalSigns,
+                                    patient: data.patient,
+                                  ),
+                                  false,
+                                ),
+                                const SizedBox(height: 24),
+                                _buildFoodLogsCard(data.recentFoods),
+                                const SizedBox(height: 24),
+                                _buildClinicalActionCard(
+                                  data.staffNotes,
+                                  data.patient['line_user_id'],
+                                ),
+                              ],
+                            );
+                          }
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: OpdVisitHistoryView(
+                    patientId: widget.patientId,
+                    patientName: patientName.isNotEmpty
+                        ? patientName
+                        : 'ผู้ป่วย',
+                    latestSbp: latestSbp,
+                    latestDbp: latestDbp,
+                    latestPulse: latestPulse,
+                  ),
+                ),
+                _buildTimelineTab(),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// แท็บแสดงกระแสเหตุการณ์ทางคลินิกตามลำดับเวลา (Clinical Timeline)
+  Widget _buildTimelineTab() {
+    final timelineAsync = ref.watch(patientTimelineProvider(widget.patientId));
+
+    return timelineAsync.when(
+      loading: () => const Center(
+        child: CircularProgressIndicator(color: ClinicalColors.primaryEmerald),
+      ),
+      error: (e, _) => Center(
+        child: Text(
+          'ไม่สามารถดึงข้อมูลไทม์ไลน์ได้: $e',
+          style: const TextStyle(color: ClinicalColors.criticalRed),
+        ),
+      ),
+      data: (events) {
+        if (events.isEmpty) {
+          return const Center(
+            child: Text(
+              'ยังไม่มีบันทึกเหตุการณ์ทางคลินิกของผู้ป่วยรายนี้',
+              style: TextStyle(color: ClinicalColors.textMuted),
+            ),
+          );
+        }
+
+        return ListView.builder(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+          itemCount: events.length,
+          itemBuilder: (context, index) {
+            final ev = events[index];
+            final dateStr =
+                '${ev.timestamp.day}/${ev.timestamp.month}/${ev.timestamp.year} ${ev.timestamp.hour.toString().padLeft(2, '0')}:${ev.timestamp.minute.toString().padLeft(2, '0')} น.';
+
+            Color dotColor = ClinicalColors.primaryEmerald;
+            IconData eventIcon = Icons.medical_information_outlined;
+
+            if (ev.severity == 'CRITICAL') {
+              dotColor = ClinicalColors.criticalRed;
+              eventIcon = Icons.crisis_alert_rounded;
+            } else if (ev.severity == 'WARNING') {
+              dotColor = ClinicalColors.warningOrange;
+              eventIcon = Icons.warning_amber_rounded;
+            } else if (ev.eventType == TimelineEventType.staffAction) {
+              dotColor = const Color(0xFF6366F1);
+              eventIcon = Icons.send_rounded;
+            } else if (ev.eventType == TimelineEventType.appointment) {
+              dotColor = const Color(0xFF0284C7);
+              eventIcon = Icons.calendar_today_rounded;
+            }
+
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Column(
+                  children: [
+                    Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: dotColor.withValues(alpha: 0.15),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: dotColor, width: 2),
+                      ),
+                      child: Icon(eventIcon, size: 16, color: dotColor),
+                    ),
+                    if (index != events.length - 1)
+                      Container(
+                        width: 2,
+                        height: 64,
+                        color: ClinicalColors.borderLight,
+                      ),
+                  ],
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Container(
+                    margin: const EdgeInsets.only(bottom: 16),
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: ClinicalColors.surfaceWhite,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: ClinicalColors.borderLight),
+                      boxShadow: ClinicalColors.softShadow,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Expanded(
+                              child: Text(
+                                ev.title,
+                                style: TextStyle(
+                                  fontSize: 13.5,
+                                  fontWeight: FontWeight.bold,
+                                  color: ev.severity == 'CRITICAL'
+                                      ? ClinicalColors.criticalRed
+                                      : ClinicalColors.textPrimary,
+                                ),
+                              ),
+                            ),
+                            Text(
+                              dateStr,
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: ClinicalColors.textMuted,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          ev.description,
+                          style: const TextStyle(
+                            fontSize: 12.5,
+                            color: Color(0xFF4A3833),
+                            height: 1.3,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            const Icon(
+                              Icons.person_outline_rounded,
+                              size: 13,
+                              color: ClinicalColors.textMuted,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              'ผู้ดำเนินการ: ${ev.actor ?? "ระบบอัตโนมัติ"}',
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: ClinicalColors.textMuted,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildPatientHeader(
+    Map<String, dynamic> p,
+    List<Map<String, dynamic>> vitals,
+    Map<String, dynamic>? latestLab,
+  ) {
+    final name =
+        p['name'] ?? '${p['first_name'] ?? ''} ${p['last_name'] ?? ''}';
+    final latestVital = vitals.isNotEmpty ? vitals.first : <String, dynamic>{};
+    final sbp = (latestVital['systolic'] as num?)?.toInt();
+    final dbp = (latestVital['diastolic'] as num?)?.toInt();
+    final pulse = (latestVital['pulse'] as num?)?.toInt();
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: ClinicalColors.surfaceWhite,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: ClinicalColors.borderLight),
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final isNarrow = constraints.maxWidth < 850;
+
+          final profileInfo = Row(
+            children: [
+              CircleAvatar(
+                radius: 28,
+                backgroundColor: ClinicalColors.primaryEmerald.withAlpha(30),
+                child: const Icon(
+                  Icons.person,
+                  color: ClinicalColors.primaryEmerald,
+                  size: 32,
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      name,
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'HN: ${p['hn'] ?? '-'} | อายุ: ${p['age'] ?? '-'} ปี | เพศ: ${p['gender'] ?? '-'}',
+                      style: const TextStyle(
+                        color: ClinicalColors.textMuted,
+                        fontSize: 13,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'โรคประจำตัว: ${p['underlying_diseases'] ?? 'ยังไม่ระบุ'}',
+                      style: const TextStyle(
+                        color: ClinicalColors.deepCocoa,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          );
+
+          // 🟢 ชุดปุ่มคำสั่งทางคลินิก (Action Buttons)
+          final actionButtons = Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              // 1. ปุ่มบันทึกผลตรวจ (V/S, Labs, X-ray, EKG ส่งเข้าแอปคนไข้)
+              ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF10B981),
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
+                ),
+                onPressed: () {
+                  showDialog(
+                    context: context,
+                    builder: (ctx) => ClinicalRecordEntryDialog(
+                      patientId: widget.patientId,
+                      patientName: name,
+                      onSaved: () {
+                        ref.invalidate(patientDetailProvider(widget.patientId));
+                        ref.invalidate(
+                          patientTimelineProvider(widget.patientId),
+                        );
+                        ref.invalidate(triageOverviewProvider);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              'บันทึกผลตรวจและส่งเข้าประวัติผู้ป่วยเรียบร้อยแล้ว',
+                            ),
+                            backgroundColor: ClinicalColors.primaryEmerald,
+                          ),
+                        );
+                      },
+                    ),
+                  );
+                },
+                icon: const Icon(Icons.add_chart_rounded, size: 18),
+                label: const Text(
+                  'บันทึกผลตรวจ',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                ),
+              ),
+
+              // 2. ปุ่มตรวจรักษาเวชระเบียน (OPD Visit: CC, PI, PE, Dx)
+              ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF0284C7),
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
+                ),
+                onPressed: () {
+                  showDialog(
+                    context: context,
+                    barrierDismissible: false,
+                    builder: (ctx) => OpdEncounterDialog(
+                      patientId: widget.patientId,
+                      patientName: name,
+                      sbp: sbp,
+                      dbp: dbp,
+                      pulse: pulse,
+                      onSaved: () {
+                        ref.invalidate(
+                          patientOpdVisitsProvider(widget.patientId),
+                        );
+                        ref.invalidate(
+                          patientTimelineProvider(widget.patientId),
+                        );
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              'บันทึกเวชระเบียนการตรวจรักษา (OPD Visit) เรียบร้อยแล้ว',
+                            ),
+                            backgroundColor: ClinicalColors.primaryEmerald,
+                          ),
+                        );
+                      },
+                    ),
+                  );
+                },
+                icon: const Icon(Icons.medical_services_rounded, size: 18),
+                label: const Text(
+                  'ตรวจรักษา (OPD)',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                ),
+              ),
+
+              // 3. ปุ่ม CDSS แนวทางการรักษา HT 2024 (ของเดิม)
+              ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFF0FDF4),
+                  foregroundColor: ClinicalColors.primaryEmerald,
+                  side: const BorderSide(color: Color(0xFFBBF7D0)),
+                  elevation: 0,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
+                ),
+                onPressed: () =>
+                    _openClinicalRecommendations(p, vitals, latestLab),
+                icon: const Icon(
+                  Icons.medical_information_rounded,
+                  size: 18,
+                  color: ClinicalColors.primaryEmerald,
+                ),
+                label: const Text(
+                  'CDSS แนวทางรักษา',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                ),
+              ),
+
+              // 4. ปุ่มนัดหมาย F/U (ของเดิม)[cite: 3]
+              ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: ClinicalColors.canvasBg,
+                  foregroundColor: ClinicalColors.deepCocoa,
+                  side: const BorderSide(color: ClinicalColors.borderLight),
+                  elevation: 0,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
+                ),
+                onPressed: _showFollowUpDialog,
+                icon: const Icon(
+                  Icons.calendar_month_outlined,
+                  size: 18,
+                  color: ClinicalColors.primaryEmerald,
+                ),
+                label: const Text(
+                  'นัดหมาย F/U',
+                  style: TextStyle(fontSize: 13),
+                ),
+              ),
+
+              // 5. ปุ่มลบเวชระเบียนผู้ป่วย (Admin Only พร้อมยืนยันรหัสผ่าน)
+              IconButton(
+                tooltip: 'ลบเวชระเบียนผู้ป่วยถาวร',
+                style: IconButton.styleFrom(
+                  backgroundColor: const Color(0xFFEF4444)
+                      .withValues(alpha: 0.12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                icon: const Icon(
+                  Icons.delete_outline_rounded,
+                  color: Color(0xFFDC2626),
+                  size: 20,
+                ),
+                onPressed: () {
+                  showDialog(
+                    context: context,
+                    barrierDismissible: false,
+                    builder: (ctx) => PatientDeleteConfirmDialog(
+                      patientId: widget.patientId,
+                      patientName: name,
+                      hn: p['hn'] ?? '-',
+                      onDeleted: () {
+                        Navigator.of(context).pop();
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              'ลบข้อมูลผู้ป่วยและประวัติที่เกี่ยวข้องทั้งหมดเรียบร้อยแล้ว',
+                            ),
+                            backgroundColor: ClinicalColors.primaryEmerald,
+                          ),
+                        );
+                      },
+                    ),
+                  );
+                },
+              ),
+            ],
+          );
+
+          if (isNarrow) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                profileInfo,
+                const SizedBox(height: 16),
+                actionButtons,
+              ],
+            );
+          } else {
+            return Row(
+              children: [
+                Expanded(child: profileInfo),
+                const SizedBox(width: 16),
+                actionButtons,
+              ],
+            );
+          }
+        },
+      ),
+    );
+  }
+
+  Widget _buildVitalSignsCard(
+    List<Map<String, dynamic>> vitals,
+    Map<String, dynamic>? latestLab,
+    Map<String, dynamic> patient,
+  ) {
+    final latestVital = vitals.isNotEmpty ? vitals.first : null;
+    final latestDate = latestVital?['recorded_at']?.toString() ?? '';
+    final latestLabDate = latestLab?['lab_date']?.toString() ?? '-';
+    final healthValues = <(String, String)>[];
+    if (latestVital != null) {
+      healthValues.addAll([
+        (
+          'ความดัน',
+          '${latestVital['systolic'] ?? '-'} / ${latestVital['diastolic'] ?? '-'} mmHg',
+        ),
+        ('ชีพจร', '${latestVital['pulse'] ?? '-'} ครั้ง/นาที'),
+      ]);
+    }
+    for (final (label, key) in [
+      ('น้ำตาล FBS', 'fbs'),
+      ('HbA1c', 'hba1c'),
+      ('การทำงานไต eGFR', 'egfr'),
+      ('ไขมันรวม', 'cholesterol'),
+    ]) {
+      final value = labValue(latestLab, key);
+      if (value != null && value.toString().trim().isNotEmpty) {
+        healthValues.add((label, value.toString()));
+      }
+    }
+    final conditions = patient['underlying_diseases']?.toString().trim();
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: ClinicalColors.surfaceWhite,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: ClinicalColors.borderLight),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(
+                Icons.health_and_safety_rounded,
+                color: ClinicalColors.primaryEmerald,
+              ),
+              SizedBox(width: 8),
+              Text(
+                'ติดตามสุขภาพรายบุคคล',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            latestVital == null
+                ? 'ยังไม่มีสัญญาณชีพล่าสุด'
+                : 'สัญญาณชีพล่าสุด ${latestDate.split('T').first}',
+            style: const TextStyle(
+              fontSize: 12,
+              color: ClinicalColors.textMuted,
+            ),
+          ),
+          Text(
+            'บันทึกสัญญาณชีพ ${vitals.length} ครั้ง · ผลตรวจล่าสุด $latestLabDate',
+            style: const TextStyle(
+              fontSize: 11,
+              color: ClinicalColors.textMuted,
+            ),
+          ),
+          if (conditions != null && conditions.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              'ประวัติสุขภาพ: $conditions',
+              style: const TextStyle(
+                fontSize: 12,
+                color: ClinicalColors.textPrimary,
+              ),
+            ),
+          ],
+          const SizedBox(height: 16),
+          if (healthValues.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8.0),
+              child: Text(
+                'ยังไม่มีข้อมูลสัญญาณชีพหรือผลตรวจที่จะแสดง',
+                style: TextStyle(color: ClinicalColors.textMuted, fontSize: 13),
+              ),
+            )
+          else ...[
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: healthValues
+                  .map(
+                    (entry) => Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: ClinicalColors.canvasBg,
+                        borderRadius: BorderRadius.circular(9),
+                      ),
+                      child: Text(
+                        '${entry.$1}: ${entry.$2}',
+                        style: const TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          color: ClinicalColors.textPrimary,
+                        ),
+                      ),
+                    ),
+                  )
+                  .toList(),
+            ),
+            if (vitals.isNotEmpty) ...[
+              const Divider(height: 24),
+              const Text(
+                'บันทึกสัญญาณชีพย้อนหลัง',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              ...vitals.take(3).map((v) {
+                final values = <(String, String)>[
+                  (
+                    'ความดัน',
+                    '${v['systolic'] ?? '-'} / ${v['diastolic'] ?? '-'} mmHg',
+                  ),
+                  ('ชีพจร', '${v['pulse'] ?? '-'} ครั้ง/นาที'),
+                ];
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: ClinicalColors.canvasBg,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${v['recorded_at'] ?? ''}'.split('T').first,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: ClinicalColors.textMuted,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 16,
+                        runSpacing: 8,
+                        children: values
+                            .map(
+                              (entry) => Text(
+                                '${entry.$1}: ${entry.$2}',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  color: ClinicalColors.textPrimary,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            )
+                            .toList(),
+                      ),
+                    ],
+                  ),
+                );
+              }),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLabCard(
+    Map<String, dynamic>? lab, [
+    Map<String, dynamic>? patient,
+  ]) {
+    final patientName = patient != null
+        ? (patient['name'] ??
+                  '${patient['first_name'] ?? ''} ${patient['last_name'] ?? ''}')
+              .toString()
+              .trim()
+        : 'ผู้ป่วย';
+    final hn = patient?['hn']?.toString() ?? '-';
+
+    if (lab == null || lab.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: ClinicalColors.surfaceWhite,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: ClinicalColors.borderLight),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Row(
+                  children: [
+                    Icon(
+                      Icons.biotech_rounded,
+                      color: ClinicalColors.primaryEmerald,
+                    ),
+                    SizedBox(width: 8),
+                    Text(
+                      'ผลตรวจทางห้องปฏิบัติการ (Latest Labs)',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: ClinicalColors.textPrimary,
+                      ),
+                    ),
+                  ],
+                ),
+                OutlinedButton.icon(
+                  onPressed: () {
+                    showDialog(
+                      context: context,
+                      builder: (ctx) => LabHistoryComparisonDialog(
+                        patientId: widget.patientId,
+                        patientName: patientName.isNotEmpty
+                            ? patientName
+                            : 'ผู้ป่วย',
+                        hn: hn,
+                      ),
+                    );
+                  },
+                  icon: const Icon(
+                    Icons.compare_arrows_rounded,
+                    size: 16,
+                    color: Color(0xFF0284C7),
+                  ),
+                  label: const Text(
+                    'ดูประวัติผลแล็บ',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF0284C7),
+                    ),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    side: const BorderSide(color: Color(0xFFBAE6FD)),
+                    backgroundColor: const Color(0xFFF0F9FF),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 6,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+            const Center(
+              child: Text(
+                'ยังไม่มีข้อมูลผลตรวจแล็บในระบบ',
+                style: TextStyle(color: ClinicalColors.textMuted, fontSize: 13),
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
+        ),
+      );
+    }
+
+    final labDate = lab['lab_date']?.toString() ?? '-';
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: ClinicalColors.surfaceWhite,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: ClinicalColors.borderLight),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // ส่วนหัวการ์ด พร้อมปุ่มกดดูกราฟและตารางเปรียบเทียบย้อนหลัง
+          Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            runSpacing: 8,
+            children: [
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.biotech_rounded,
+                    color: ClinicalColors.primaryEmerald,
+                  ),
+                  const SizedBox(width: 8),
+                  const Text(
+                    'ผลตรวจทางห้องปฏิบัติการ (Latest Labs)',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: ClinicalColors.textPrimary,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    '(ตรวจ: $labDate)',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: ClinicalColors.textMuted,
+                    ),
+                  ),
+                ],
+              ),
+              OutlinedButton.icon(
+                onPressed: () {
+                  showDialog(
+                    context: context,
+                    builder: (ctx) => LabHistoryComparisonDialog(
+                      patientId: widget.patientId,
+                      patientName: patientName.isNotEmpty
+                          ? patientName
+                          : 'ผู้ป่วย',
+                      hn: hn,
+                    ),
+                  );
+                },
+                icon: const Icon(
+                  Icons.compare_arrows_rounded,
+                  size: 16,
+                  color: Color(0xFF0284C7),
+                ),
+                label: const Text(
+                  'ประวัติและเปรียบเทียบผลแล็บ',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF0284C7),
+                  ),
+                ),
+                style: OutlinedButton.styleFrom(
+                  side: const BorderSide(color: Color(0xFFBAE6FD)),
+                  backgroundColor: const Color(0xFFF0F9FF),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+
+          // 1. หมวดระดับน้ำตาลและการทำงานของไต (Glycemic & Renal Function)
+          const Text(
+            '1. ควบคุมระดับน้ำตาล & การทำงานของไต (Glycemic & Renal)',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              color: ClinicalColors.textMuted,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 10,
+            runSpacing: 8,
+            children: [
+              _buildLabChip(
+                'FBS',
+                labValue(lab, 'fbs'),
+                'mg/dL',
+                warnHigh: 126,
+              ),
+              _buildLabChip(
+                'HbA1c',
+                labValue(lab, 'hba1c'),
+                '%',
+                warnHigh: 7.0,
+              ),
+              _buildLabChip('BUN', labValue(lab, 'bun'), 'mg/dL', warnHigh: 20),
+              _buildLabChip(
+                'Creatinine',
+                labValue(lab, 'creatinine'),
+                'mg/dL',
+                warnHigh: 1.2,
+              ),
+              _buildLabChip(
+                'eGFR',
+                labValue(lab, 'egfr'),
+                'ml/min',
+                warnLow: 60,
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+
+          // 2. หมวดไขมันในเลือด (Lipid Profile)
+          const Text(
+            '2. ไขมันในเลือด (Lipid Profile)',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              color: ClinicalColors.textMuted,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 10,
+            runSpacing: 8,
+            children: [
+              _buildLabChip(
+                'Total Chol',
+                labValue(lab, 'cholesterol'),
+                'mg/dL',
+                warnHigh: 200,
+              ),
+              _buildLabChip(
+                'Triglyceride',
+                labValue(lab, 'triglyceride'),
+                'mg/dL',
+                warnHigh: 150,
+              ),
+              _buildLabChip('HDL', labValue(lab, 'hdl'), 'mg/dL', warnLow: 40),
+              _buildLabChip(
+                'LDL',
+                labValue(lab, 'ldl'),
+                'mg/dL',
+                warnHigh: 100,
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+
+          // 3. หมวดเกลือแร่, ตับ, และปัสสาวะ (Electrolytes, Liver & Urinalysis)
+          const Text(
+            '3. เกลือแร่ / ตับ / ปัสสาวะ (Electrolytes, Liver & Urine)',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              color: ClinicalColors.textMuted,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 10,
+            runSpacing: 8,
+            children: [
+              _buildLabChip(
+                'Na+',
+                labValue(lab, 'sodium'),
+                'mEq/L',
+                warnLow: 135,
+                warnHigh: 145,
+              ),
+              _buildLabChip(
+                'K+',
+                labValue(lab, 'potassium'),
+                'mEq/L',
+                warnLow: 3.5,
+                warnHigh: 5.0,
+              ),
+              _buildLabChip('Cl-', labValue(lab, 'chloride'), 'mEq/L'),
+              _buildLabChip(
+                'HCO3-',
+                labValue(lab, 'bicarbonate'),
+                'mEq/L',
+                warnLow: 22,
+              ),
+              _buildLabChip('AST', labValue(lab, 'ast'), 'U/L', warnHigh: 40),
+              _buildLabChip('ALT', labValue(lab, 'alt'), 'U/L', warnHigh: 40),
+              _buildLabChip('ALP', labValue(lab, 'alp'), 'U/L', warnHigh: 120),
+              _buildLabChip(
+                'Uric Acid',
+                labValue(lab, 'uric_acid'),
+                'mg/dL',
+                warnHigh: 7.0,
+              ),
+              if (labValue(lab, 'uacr') != null)
+                _buildLabChip(
+                  'UACR',
+                  labValue(lab, 'uacr'),
+                  'mg/g Cr',
+                  warnHigh: 30,
+                ),
+              if (labValue(lab, 'urine_protein') != null)
+                _buildLabChip(
+                  'Urine Protein',
+                  labValue(lab, 'urine_protein'),
+                  '',
+                ),
+            ],
+          ),
+
+          // สรุปผลการตรวจทางห้องปฏิบัติการ (ถ้ามี)
+          if (labValue(lab, 'clinical_interpretation') != null &&
+              labValue(
+                lab,
+                'clinical_interpretation',
+              ).toString().trim().isNotEmpty) ...[
+            const SizedBox(height: 14),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF8FAFC),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFE2E8F0)),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(
+                    Icons.assignment_outlined,
+                    size: 16,
+                    color: Color(0xFF64748B),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'สรุปผลแล็บ: ${lab['clinical_interpretation']}',
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: ClinicalColors.textPrimary,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLabChip(
+    String label,
+    dynamic rawValue,
+    String unit, {
+    double? warnHigh,
+    double? warnLow,
+  }) {
+    if (rawValue == null || rawValue.toString().trim().isEmpty)
+      return const SizedBox.shrink();
+    final numVal = (rawValue is num)
+        ? rawValue.toDouble()
+        : double.tryParse(rawValue.toString());
+    bool isAbnormal = false;
+    if (numVal != null) {
+      if (warnHigh != null && numVal > warnHigh) isAbnormal = true;
+      if (warnLow != null && numVal < warnLow) isAbnormal = true;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: isAbnormal ? const Color(0xFFFEF2F2) : const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: isAbnormal ? const Color(0xFFFCA5A5) : const Color(0xFFCBD5E1),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            '$label: ',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: isAbnormal
+                  ? const Color(0xFFDC2626)
+                  : const Color(0xFF64748B),
+            ),
+          ),
+          Text(
+            rawValue.toString(),
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              color: isAbnormal
+                  ? const Color(0xFFDC2626)
+                  : const Color(0xFF0F172A),
+            ),
+          ),
+          if (unit.isNotEmpty) ...[
+            const SizedBox(width: 4),
+            Text(
+              unit,
+              style: TextStyle(
+                fontSize: 11,
+                color: isAbnormal
+                    ? const Color(0xFFEF4444)
+                    : const Color(0xFF94A3B8),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFoodLogsCard(List<Map<String, dynamic>> foods) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: ClinicalColors.surfaceWhite,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: ClinicalColors.borderLight),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'บันทึกอาหารล่าสุด (Nutrition Log)',
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 16),
+          if (foods.isEmpty)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(16),
+                child: Text(
+                  'ไม่มีบันทึกอาหาร',
+                  style: TextStyle(color: ClinicalColors.textMuted),
+                ),
+              ),
+            )
+          else
+            ...foods.map((f) {
+              final sodium = (f['sodium_mg'] as num?)?.toInt() ?? 0;
+              final isHighSodium = sodium > 800;
+              return Container(
+                margin: const EdgeInsets.only(bottom: 8),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: ClinicalColors.canvasBg,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            f['food_name'] ?? 'อาหารทั่วไป',
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          Text(
+                            'พลังงาน: ${f['calories'] ?? 0} kcal',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: ClinicalColors.textMuted,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: isHighSodium
+                            ? ClinicalColors.warningBg
+                            : ClinicalColors.normalBg,
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        'โซเดียม: $sodium mg',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          color: isHighSodium
+                              ? ClinicalColors.warningOrange
+                              : ClinicalColors.normalGreen,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildClinicalActionCard(
+    List<Map<String, dynamic>> notes,
+    String? lineUserId,
+  ) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: ClinicalColors.surfaceWhite,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: ClinicalColors.borderLight),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: const [
+              Icon(
+                Icons.send_rounded,
+                size: 18,
+                color: ClinicalColors.primaryEmerald,
+              ),
+              SizedBox(width: 8),
+              Text(
+                'ส่งคำแนะนำทางการแพทย์ (Clinical Action)',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          const Text(
+            'เลือกข้อความสำเร็จรูป (Preset):',
+            style: TextStyle(fontSize: 12, color: ClinicalColors.textMuted),
+          ),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: _quickPresets
+                .map(
+                  (preset) => ActionChip(
+                    backgroundColor: ClinicalColors.canvasBg,
+                    side: const BorderSide(color: ClinicalColors.borderLight),
+                    label: Text(preset, style: const TextStyle(fontSize: 11)),
+                    onPressed: () =>
+                        setState(() => _noteController.text = preset),
+                  ),
+                )
+                .toList(),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _noteController,
+            maxLines: 3,
+            decoration: const InputDecoration(
+              hintText: 'พิมพ์คำแนะนำเพิ่มเติมหรือปรับแต่งข้อความก่อนส่ง...',
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.all(Radius.circular(10)),
+              ),
+              contentPadding: EdgeInsets.all(12),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Checkbox(
+                value: _sendToLine,
+                activeColor: ClinicalColors.primaryEmerald,
+                onChanged: (val) => setState(() => _sendToLine = val ?? true),
+              ),
+              const Text(
+                'ส่งแจ้งเตือนเข้า LINE คนไข้',
+                style: TextStyle(fontSize: 13),
+              ),
+              const Spacer(),
+              ElevatedButton.icon(
+                onPressed: _isSaving
+                    ? null
+                    : () => _submitClinicalAction(lineUserId),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: ClinicalColors.primaryEmerald,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 12,
+                  ),
+                ),
+                icon: _isSaving
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                          strokeWidth: 2,
+                        ),
+                      )
+                    : const Icon(Icons.send, size: 16),
+                label: const Text('ส่งคำแนะนำ'),
+              ),
+            ],
+          ),
+          if (notes.isNotEmpty) ...[
+            const Divider(height: 24),
+            const Text(
+              'ประวัติคำแนะนำที่เคยส่ง:',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            ...notes
+                .take(3)
+                .map(
+                  (n) => Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Text(
+                      '• ${n['note_text']} (${n['staff_name'] ?? 'เจ้าหน้าที่'})',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: ClinicalColors.textMuted,
+                      ),
+                    ),
+                  ),
+                ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _submitClinicalAction(String? lineUserId) async {
+    if (_noteController.text.trim().isEmpty) return;
+    setState(() => _isSaving = true);
+
+    final currentUser = Supabase.instance.client.auth.currentUser;
+    final staffName =
+        (currentUser?.userMetadata?['full_name'] ??
+                currentUser?.userMetadata?['name'] ??
+                currentUser?.email ??
+                'พยาบาลวิชาชีพเวชปฏิบัติ')
+            .toString();
+
+    try {
+      await ref
+          .read(triageRepositoryProvider)
+          .sendClinicalAction(
+            patientId: widget.patientId,
+            noteText: _noteController.text.trim(),
+            staffName: staffName,
+            sendToLine: _sendToLine,
+            lineUserId: lineUserId,
+          );
+      _noteController.clear();
+      ref.invalidate(patientDetailProvider(widget.patientId));
+      ref.invalidate(patientTimelineProvider(widget.patientId));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('ส่งคำแนะนำและบันทึกข้อมูลเรียบร้อยแล้ว'),
+            backgroundColor: ClinicalColors.primaryEmerald,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('เกิดข้อผิดพลาด: $e'),
+            backgroundColor: ClinicalColors.criticalRed,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
+    }
+  }
+
+  Future<void> _showFollowUpDialog() async {
+    DateTime selectedDate = DateTime.now().add(const Duration(days: 7));
+    final reasonController = TextEditingController(
+      text: 'ตรวจติดตามระดับความดันและผลแล็บ',
+    );
+    final clinicController = TextEditingController(text: 'หน่วยบริการสุขภาพ');
+    bool needFasting = false;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: const Text(
+            'นัดหมายติดตามอาการ / ส่งต่อแพทย์',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'วันที่นัดหมาย:',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 6),
+                OutlinedButton.icon(
+                  onPressed: () async {
+                    final picked = await showDatePicker(
+                      context: dialogContext,
+                      initialDate: selectedDate,
+                      firstDate: DateTime.now(),
+                      lastDate: DateTime.now().add(const Duration(days: 180)),
+                    );
+                    if (picked != null) {
+                      setDialogState(() => selectedDate = picked);
+                    }
+                  },
+                  icon: const Icon(Icons.calendar_today, size: 16),
+                  label: Text(selectedDate.toIso8601String().split('T').first),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: clinicController,
+                  decoration: const InputDecoration(
+                    labelText: 'แพทย์ / แผนก / คลินิกที่นัด',
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: reasonController,
+                  decoration: const InputDecoration(
+                    labelText: 'เหตุผลการนัดหมาย',
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  title: const Text('ต้องงดน้ำ-อาหารก่อนตรวจ (เจาะเลือด)'),
+                  value: needFasting,
+                  activeColor: ClinicalColors.primaryEmerald,
+                  onChanged: (val) =>
+                      setDialogState(() => needFasting = val ?? false),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('ยกเลิก'),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: ClinicalColors.primaryEmerald,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () async {
+                Navigator.pop(ctx);
+                await ref
+                    .read(triageRepositoryProvider)
+                    .scheduleFollowUp(
+                      patientId: widget.patientId,
+                      followUpDate: selectedDate,
+                      reason: reasonController.text,
+                      doctorOrClinic: clinicController.text,
+                      needFasting: needFasting,
+                    );
+                ref.invalidate(patientDetailProvider(widget.patientId));
+                ref.invalidate(patientTimelineProvider(widget.patientId));
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        'บันทึกการนัดหมายและลงตารางนัดเรียบร้อยแล้ว',
+                      ),
+                      backgroundColor: ClinicalColors.primaryEmerald,
+                    ),
+                  );
+                }
+              },
+              child: const Text('บันทึกนัดหมาย'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
