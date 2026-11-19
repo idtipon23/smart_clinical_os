@@ -4,14 +4,17 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:http/http.dart' as http;
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/constants/clinical_theme.dart';
+import '../../../services/clinical_ai_copilot_service.dart';
+import '../../../services/clinical_ai_privacy.dart';
 import '../../../services/general_medical_consult_engine.dart';
+import '../../overview/data/opd_visit_repository.dart';
 import '../../overview/data/patient_triage_model.dart';
 import '../../overview/data/triage_repository.dart' hide TriageCategory;
 import '../../overview/presentation/patient_detail_screen.dart';
+import 'widgets/ai_workup_result_card.dart';
 
 class CdssDataEntryScreen extends ConsumerStatefulWidget {
   const CdssDataEntryScreen({super.key});
@@ -43,9 +46,9 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
   final Set<String> _selectedRedFlags = {};
   GeneralMedicalConsultInput? _consultationInput;
   GeneralMedicalConsultResult? _cdssResult;
-  String? _geminiRecommendation;
+  Map<String, dynamic>? _geminiWorkup;
   bool _isSaving = false;
-  bool _isGeminiLoading = false;
+  bool _isWorkupLoading = false;
   int _inputRevision = 0;
 
   List<TextEditingController> get _inputControllers => [
@@ -76,14 +79,12 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
 
   void _clearStaleConsultResult() {
     _inputRevision++;
-    if (_cdssResult != null ||
-        _geminiRecommendation != null ||
-        _isGeminiLoading) {
+    if (_cdssResult != null || _geminiWorkup != null || _isWorkupLoading) {
       setState(() {
         _consultationInput = null;
         _cdssResult = null;
-        _geminiRecommendation = null;
-        _isGeminiLoading = false;
+        _geminiWorkup = null;
+        _isWorkupLoading = false;
       });
     }
   }
@@ -118,8 +119,8 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
       _selectedPatient = patient;
       _consultationInput = null;
       _cdssResult = null;
-      _geminiRecommendation = null;
-      _isGeminiLoading = false;
+      _geminiWorkup = null;
+      _isWorkupLoading = false;
       _complaintController.clear();
       _onsetController.clear();
       _symptomsController.clear();
@@ -168,26 +169,38 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
 
     setState(() {
       _consultationInput = input;
-      _geminiRecommendation = null;
-      _isGeminiLoading = false;
+      _geminiWorkup = null;
+      _isWorkupLoading = false;
       _cdssResult = GeneralMedicalConsultEngine.evaluate(input);
     });
   }
 
-  Future<void> _requestGeminiRecommendation() async {
-    if (_selectedPatient == null || _isGeminiLoading) {
+  Future<void> _requestAiWorkup() async {
+    final selectedPatient = _selectedPatient;
+    if (selectedPatient == null || _isWorkupLoading) return;
+    if (_complaintController.text.trim().isEmpty &&
+        _onsetController.text.trim().isEmpty &&
+        _symptomsController.text.trim().isEmpty &&
+        _selectedRedFlags.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('กรุณาระบุอาการก่อนขอ AI Workup')),
+      );
       return;
     }
-    if (_cdssResult == null) _evaluateCdss();
 
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('ส่งข้อมูลให้ Gemini?'),
+        title: const Text('ขอคำแนะนำ AI Workup?'),
         content: const Text(
-          'ระบบจะส่งอาการ ประวัติ ยา ประวัติแพ้ยา สัญญาณชีพ ผลตรวจ และอาการเตือนที่กรอกไปยัง Google Gemini API '
-          'ระบบไม่ส่งชื่อหรือรหัสจากข้อมูลผู้ป่วยที่เลือก แต่ข้อความอิสระจะถูกส่งตามที่กรอก โปรดลบข้อมูลระบุตัวบุคคลก่อนส่ง '
-          'คำตอบเป็นเพียงข้อมูลประกอบการพิจารณา และไม่ควรรอคำตอบ AI หากเป็นเหตุฉุกเฉิน',
+          'เมื่อยืนยัน ระบบจะส่งเฉพาะข้อมูลทางคลินิกที่ผ่านการกรอง '
+          '(อายุ เพศ สัญญาณชีพ อาการ โรคร่วม ประวัติแพ้ยา ยาปัจจุบัน และผลตรวจ) '
+          'ผ่าน Supabase Edge Function ไปยัง Google Gemini API เพื่อขอ AI Workup '
+          'ขั้นนี้ไม่ให้คำแนะนำเรื่องยา '
+          'ระบบลบข้อมูลระบุตัวตนจากประวัติผู้ป่วยและตรวจจับรูปแบบทั่วไป '
+          'แต่ไม่รับประกันการตรวจพบชื่อหรือที่อยู่ที่พิมพ์ปะปนในข้อความอิสระ '
+          'โปรดตรวจข้อความก่อนยืนยัน ผลลัพธ์เป็นข้อมูลประกอบการพิจารณา '
+          'และห้ามรอ AI ในกรณีฉุกเฉิน',
         ),
         actions: [
           TextButton(
@@ -196,94 +209,164 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('ยืนยันส่งข้อมูล'),
+            child: const Text('ยืนยันและขอ AI Workup'),
           ),
         ],
       ),
     );
     if (confirmed != true || !mounted) return;
 
-    final accessToken =
-        Supabase.instance.client.auth.currentSession?.accessToken;
-    if (accessToken == null || accessToken.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('กรุณาเข้าสู่ระบบใหม่ก่อนใช้ Gemini')),
-      );
-      return;
-    }
-
+    if (_cdssResult == null) _evaluateCdss();
     final revision = _inputRevision;
-    final result = _cdssResult!;
-    final requestBody = {
-      'consultation': {
-        'chief_complaint': _complaintController.text.trim(),
-        'onset': _onsetController.text.trim(),
-        'symptoms': _symptomsController.text.trim(),
-        'medical_history': _historyController.text.trim(),
-        'medications': _medicationsController.text.trim(),
-        'allergies': _allergiesController.text.trim(),
-        'observations': {
-          'blood_pressure': [
-            _sbpController.text.trim(),
-            _dbpController.text.trim(),
-          ].where((value) => value.isNotEmpty).join('/'),
-          'pulse': _pulseController.text.trim(),
-          'temperature': _temperatureController.text.trim(),
-          'respiratory_rate': _respiratoryRateController.text.trim(),
-          'oxygen_saturation': _oxygenSaturationController.text.trim(),
-          'weight': _weightController.text.trim(),
-          'height': _heightController.text.trim(),
-          'lab_summary': _labSummaryController.text.trim(),
-        },
-        'red_flags': _selectedRedFlags.toList(),
-        'priority': result.priority.name,
-      },
-    };
-
     setState(() {
-      _isGeminiLoading = true;
-      _geminiRecommendation = null;
+      _isWorkupLoading = true;
+      _geminiWorkup = null;
     });
 
     try {
-      final response = await http
-          .post(
-            Uri.base.resolve('/api/gemini-consult'),
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': 'Bearer $accessToken',
+      final detail = await ref.read(
+        patientDetailProvider(selectedPatient.patientId).future,
+      );
+      final patient = detail.patient;
+      final medicationRows = await ref.read(
+        patientMedicationsProvider(selectedPatient.patientId).future,
+      );
+      if (revision != _inputRevision) return;
+      final latestLab = detail.latestLab ?? const <String, dynamic>{};
+      const recentLabFields = {
+        'test_type',
+        'clinical_interpretation',
+        'fbs',
+        'hba1c',
+        'cholesterol',
+        'total_cholesterol',
+        'triglycerides',
+        'hdl',
+        'ldl',
+        'bun',
+        'creatinine',
+        'egfr',
+        'sodium',
+        'potassium',
+        'chloride',
+        'bicarbonate',
+        'ast',
+        'alt',
+        'alp',
+        'uric_acid',
+        'urine_microalbumin',
+        'uacr',
+        'urine_protein',
+      };
+      final currentMedications = <Object?>[
+        patient['current_med_classes'],
+        ...medicationRows
+            .where((item) {
+              const activeFields = [
+                'is_morning_active',
+                'is_noon_active',
+                'is_evening_active',
+                'is_bedtime_active',
+              ];
+              return !activeFields.any(item.containsKey) ||
+                  activeFields.any((field) => item[field] == true);
+            })
+            .map((item) {
+              final name = item['medication_name']?.toString().trim() ?? '';
+              if (name.isEmpty) return '';
+              final schedule = [
+                if (item['is_morning_active'] == true) 'เช้า',
+                if (item['is_noon_active'] == true) 'กลางวัน',
+                if (item['is_evening_active'] == true) 'เย็น',
+                if (item['is_bedtime_active'] == true) 'ก่อนนอน',
+              ];
+              return schedule.isEmpty ? name : '$name (${schedule.join('/')})';
+            }),
+        _medicationsController.text,
+      ];
+      final identifiers = [
+        selectedPatient.patientId,
+        selectedPatient.fullName,
+        selectedPatient.hn,
+        selectedPatient.phone,
+        ...ClinicalAiPrivacy.identifiersFromPatient(patient),
+      ];
+      final recentLabs = <String>[
+        if (selectedPatient.fbs != null) 'FBS: ${selectedPatient.fbs}',
+        if (selectedPatient.hba1c != null) 'HbA1c: ${selectedPatient.hba1c}',
+        if (selectedPatient.egfr != null) 'eGFR: ${selectedPatient.egfr}',
+        if (latestLab.isNotEmpty)
+          ...latestLab.entries
+              .where(
+                (entry) =>
+                    entry.value != null && recentLabFields.contains(entry.key),
+              )
+              .map((entry) => '${entry.key}: ${entry.value}'),
+        if (_labSummaryController.text.trim().isNotEmpty)
+          _labSummaryController.text.trim(),
+      ];
+      final result = await ref
+          .read(clinicalAiCopilotServiceProvider)
+          .suggestWorkup(
+            identifiers: identifiers,
+            clinicalContext: {
+              'age': selectedPatient.age?.toString() ?? '',
+              'gender': selectedPatient.gender ?? '',
+              'vital_signs': {
+                'blood_pressure': [
+                  _sbpController.text.trim(),
+                  _dbpController.text.trim(),
+                ].where((value) => value.isNotEmpty).join('/'),
+                'pulse': _pulseController.text.trim(),
+                'temperature': _temperatureController.text.trim(),
+                'respiratory_rate': _respiratoryRateController.text.trim(),
+                'oxygen_saturation': _oxygenSaturationController.text.trim(),
+                'weight': _weightController.text.trim(),
+                'height': _heightController.text.trim(),
+              },
+              'chief_complaints': [
+                if (_complaintController.text.trim().isNotEmpty)
+                  'อาการสำคัญ: ${_complaintController.text.trim()}',
+                if (_onsetController.text.trim().isNotEmpty)
+                  'ระยะเวลา/การเริ่มอาการ: ${_onsetController.text.trim()}',
+                if (_symptomsController.text.trim().isNotEmpty)
+                  'อาการร่วม: ${_symptomsController.text.trim()}',
+                if (_selectedRedFlags.isNotEmpty)
+                  'อาการเตือนที่เลือก: ${_selectedRedFlags.join(', ')}',
+              ].join('\n'),
+              'underlying_diseases': [
+                if (selectedPatient.underlyingDiseases != null)
+                  selectedPatient.underlyingDiseases!,
+                patient['underlying_diseases'],
+                patient['medication_risk_conditions'],
+                _historyController.text,
+              ],
+              'drug_allergies': [
+                patient['drug_allergies'],
+                _allergiesController.text,
+                ClinicalAiPrivacy.drugAllergyStatusSummary(
+                  patient['drug_allergy_status'],
+                ),
+              ],
+              'current_medications': [...currentMedications],
+              'recent_labs': recentLabs,
+              'new_prescriptions': const <String>[],
             },
-            body: jsonEncode(requestBody),
-          )
-          .timeout(const Duration(seconds: 30));
-
+          );
       if (!mounted || revision != _inputRevision) return;
 
-      final responseBody = jsonDecode(response.body);
-      if (response.statusCode != 200 ||
-          responseBody is! Map<String, dynamic> ||
-          responseBody['recommendation'] is! String) {
-        final message =
-            responseBody is Map<String, dynamic> &&
-                responseBody['error'] is String
-            ? responseBody['error'] as String
-            : 'ไม่สามารถรับคำแนะนำจาก Gemini ได้';
-        throw Exception(message);
-      }
-
       setState(() {
-        _geminiRecommendation = (responseBody['recommendation'] as String)
-            .trim();
+        _geminiWorkup = result;
       });
     } catch (error) {
       if (mounted && revision == _inputRevision) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('ขอคำแนะนำจาก Gemini ไม่สำเร็จ: $error')),
+          SnackBar(content: Text('ขอ AI Workup ไม่สำเร็จ: $error')),
         );
       }
     } finally {
       if (mounted && revision == _inputRevision) {
-        setState(() => _isGeminiLoading = false);
+        setState(() => _isWorkupLoading = false);
       }
     }
   }
@@ -350,6 +433,15 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
         'missing_information': assessment.missingInformation,
       };
 
+      final encounter = await ref
+          .read(opdVisitRepositoryProvider)
+          .createOpenConsultationEncounter(
+            patientId: patientId,
+            input: consultationInput,
+            assessment: assessment,
+          );
+      inputSnapshot['opd_visit_id'] = encounter.id;
+
       await client.from('cdss_events').insert({
         'patient_id': patientId,
         'staff_id': user?.id,
@@ -378,13 +470,14 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
       });
 
       ref.invalidate(triageOverviewProvider);
+      ref.invalidate(patientOpdVisitsProvider(patientId));
       ref.invalidate(patientDetailProvider(patientId));
       ref.invalidate(patientTimelineProvider(patientId));
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('บันทึกการประเมินและบันทึกทางคลินิกสำเร็จ'),
+            content: Text('บันทึกคำปรึกษาและเปิด OPD encounter สำเร็จ'),
             backgroundColor: ClinicalColors.primaryEmerald,
           ),
         );
@@ -506,10 +599,10 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
                   ),
                   const SizedBox(height: 20),
                   OutlinedButton.icon(
-                    onPressed: _selectedPatient == null || _isGeminiLoading
+                    onPressed: _selectedPatient == null || _isWorkupLoading
                         ? null
-                        : _requestGeminiRecommendation,
-                    icon: _isGeminiLoading
+                        : _requestAiWorkup,
+                    icon: _isWorkupLoading
                         ? const SizedBox(
                             width: 16,
                             height: 16,
@@ -517,9 +610,9 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
                           )
                         : const Icon(Icons.auto_awesome_rounded, size: 18),
                     label: Text(
-                      _isGeminiLoading
-                          ? 'กำลังขอคำแนะนำ...'
-                          : 'ส่งปรึกษา Gemini 3.5 Flash Lite',
+                      _isWorkupLoading
+                          ? 'กำลังขอ AI Workup...'
+                          : 'ขอคำแนะนำการตรวจเพิ่มเติม (AI Workup)',
                     ),
                   ),
                   const SizedBox(height: 12),
@@ -1007,39 +1100,9 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
               ),
             ),
           ),
-          if (_geminiRecommendation != null) ...[
+          if (_geminiWorkup != null) ...[
             const SizedBox(height: 12),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: ClinicalColors.primaryEmerald.withValues(alpha: 0.06),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(
-                  color: ClinicalColors.primaryEmerald.withValues(alpha: 0.25),
-                ),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'คำแนะนำจาก Gemini 3.5 Flash Lite — โปรดทบทวน',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 8),
-                  SelectableText(_geminiRecommendation!),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'ผลลัพธ์ AI ยังไม่ถูกบันทึกลงเวชระเบียนโดยอัตโนมัติ',
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: ClinicalColors.textMuted,
-                      fontStyle: FontStyle.italic,
-                    ),
-                  ),
-                ],
-              ),
-            ),
+            AiWorkupResultCard(result: _geminiWorkup!),
           ],
           const SizedBox(height: 12),
           const Text(

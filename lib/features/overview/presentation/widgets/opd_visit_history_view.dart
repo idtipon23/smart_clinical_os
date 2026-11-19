@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import '../../../../core/constants/clinical_theme.dart';
+import '../../data/clinical_entry_repository.dart';
 import '../../data/opd_visit_repository.dart';
+import '../../data/triage_repository.dart';
 import 'opd_encounter_dialog.dart';
 import '../../../../core/utils/clinical_print_util.dart';
 import '../../../settings/data/facility_management_repository.dart';
@@ -23,7 +26,8 @@ class OpdVisitHistoryView extends ConsumerStatefulWidget {
   });
 
   @override
-  ConsumerState<OpdVisitHistoryView> createState() => _OpdVisitHistoryViewState();
+  ConsumerState<OpdVisitHistoryView> createState() =>
+      _OpdVisitHistoryViewState();
 }
 
 class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
@@ -37,7 +41,9 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
       loading: () => const Center(
         child: Padding(
           padding: EdgeInsets.all(40),
-          child: CircularProgressIndicator(color: ClinicalColors.primaryEmerald),
+          child: CircularProgressIndicator(
+            color: ClinicalColors.primaryEmerald,
+          ),
         ),
       ),
       error: (err, _) => Center(
@@ -46,13 +52,20 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.error_outline, color: ClinicalColors.criticalRed, size: 40),
+              const Icon(
+                Icons.error_outline,
+                color: ClinicalColors.criticalRed,
+                size: 40,
+              ),
               const SizedBox(height: 12),
-              Text('เกิดข้อผิดพลาดในการโหลดประวัติการรักษา: $err',
-                  style: const TextStyle(color: ClinicalColors.textMuted)),
+              Text(
+                'เกิดข้อผิดพลาดในการโหลดประวัติการรักษา: $err',
+                style: const TextStyle(color: ClinicalColors.textMuted),
+              ),
               const SizedBox(height: 12),
               ElevatedButton(
-                onPressed: () => ref.invalidate(patientOpdVisitsProvider(widget.patientId)),
+                onPressed: () =>
+                    ref.invalidate(patientOpdVisitsProvider(widget.patientId)),
                 child: const Text('ลองใหม่อีกครั้ง'),
               ),
             ],
@@ -64,11 +77,21 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
           return _buildEmptyState(context);
         }
 
-        // หากยังไม่ได้เลือก ให้เลือกใบล่าสุดเป็นค่าเริ่มต้น
+        OpdVisitModel? openEncounter;
+        for (final visit in visits) {
+          if (visit.encounterStatus == 'open') {
+            openEncounter = visit;
+            break;
+          }
+        }
+
         final currentVisit = visits.firstWhere(
           (v) => v.id == _selectedVisitId,
-          orElse: () => visits.first,
+          orElse: () => openEncounter ?? visits.first,
         );
+        final encounterToContinue = currentVisit.encounterStatus == 'open'
+            ? currentVisit
+            : openEncounter;
 
         return LayoutBuilder(
           builder: (context, constraints) {
@@ -77,7 +100,7 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
             if (isNarrow) {
               return Column(
                 children: [
-                  _buildHeaderBar(context),
+                  _buildHeaderBar(context, encounterToContinue),
                   const SizedBox(height: 16),
                   _buildVisitsDropdown(visits, currentVisit),
                   const SizedBox(height: 16),
@@ -89,7 +112,7 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _buildHeaderBar(context),
+                _buildHeaderBar(context, encounterToContinue),
                 const SizedBox(height: 16),
                 Expanded(
                   child: Row(
@@ -118,7 +141,7 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
     );
   }
 
-  Widget _buildHeaderBar(BuildContext context) {
+  Widget _buildHeaderBar(BuildContext context, OpdVisitModel? openEncounter) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
@@ -130,7 +153,11 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
                 color: const Color(0xFF0284C7).withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: const Icon(Icons.history_edu_rounded, color: Color(0xFF0284C7), size: 22),
+              child: const Icon(
+                Icons.history_edu_rounded,
+                color: Color(0xFF0284C7),
+                size: 22,
+              ),
             ),
             const SizedBox(width: 12),
             const Column(
@@ -138,25 +165,47 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
               children: [
                 Text(
                   'เวชระเบียนผู้ป่วยนอก (OPD Encounters)',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: ClinicalColors.textPrimary),
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: ClinicalColors.textPrimary,
+                  ),
                 ),
                 Text(
                   'บันทึกการตรวจร่างกาย ซักประวัติ และคำสั่งการรักษาแต่ละครั้ง',
-                  style: TextStyle(fontSize: 12, color: ClinicalColors.textMuted),
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: ClinicalColors.textMuted,
+                  ),
                 ),
               ],
             ),
           ],
         ),
         ElevatedButton.icon(
-          onPressed: () => _openNewEncounterDialog(context),
-          icon: const Icon(Icons.add_rounded, size: 18),
-          label: const Text('บันทึกการตรวจครั้งใหม่', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+          onPressed: () => _openNewEncounterDialog(
+            context,
+            existingEncounter: openEncounter,
+          ),
+          icon: Icon(
+            openEncounter == null
+                ? Icons.add_rounded
+                : Icons.play_arrow_rounded,
+            size: 18,
+          ),
+          label: Text(
+            openEncounter == null
+                ? 'เริ่ม OPD encounter ใหม่'
+                : 'ทำต่อ OPD encounter ที่เปิดอยู่',
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+          ),
           style: ElevatedButton.styleFrom(
             backgroundColor: const Color(0xFF0284C7),
             foregroundColor: Colors.white,
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+            ),
             elevation: 0,
           ),
         ),
@@ -164,7 +213,10 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
     );
   }
 
-  Widget _buildVisitsList(List<OpdVisitModel> visits, OpdVisitModel currentVisit) {
+  Widget _buildVisitsList(
+    List<OpdVisitModel> visits,
+    OpdVisitModel currentVisit,
+  ) {
     return Container(
       decoration: BoxDecoration(
         color: ClinicalColors.surfaceWhite,
@@ -174,12 +226,15 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
       child: ListView.separated(
         shrinkWrap: true,
         itemCount: visits.length,
-        separatorBuilder: (_, __) => const Divider(height: 1, color: ClinicalColors.borderLight),
+        separatorBuilder: (_, __) =>
+            const Divider(height: 1, color: ClinicalColors.borderLight),
         itemBuilder: (context, index) {
           final v = visits[index];
           final isSelected = v.id == currentVisit.id;
-          final dateStr = '${v.visitDate.day}/${v.visitDate.month}/${v.visitDate.year + 543}';
-          final timeStr = '${v.visitDate.hour.toString().padLeft(2, '0')}:${v.visitDate.minute.toString().padLeft(2, '0')} น.';
+          final dateStr =
+              '${v.visitDate.day}/${v.visitDate.month}/${v.visitDate.year + 543}';
+          final timeStr =
+              '${v.visitDate.hour.toString().padLeft(2, '0')}:${v.visitDate.minute.toString().padLeft(2, '0')} น.';
 
           return InkWell(
             onTap: () => setState(() => _selectedVisitId = v.id),
@@ -187,10 +242,14 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
             child: Container(
               padding: const EdgeInsets.all(14),
               decoration: BoxDecoration(
-                color: isSelected ? const Color(0xFFF0F9FF) : Colors.transparent,
+                color: isSelected
+                    ? const Color(0xFFF0F9FF)
+                    : Colors.transparent,
                 border: Border(
                   left: BorderSide(
-                    color: isSelected ? const Color(0xFF0284C7) : Colors.transparent,
+                    color: isSelected
+                        ? const Color(0xFF0284C7)
+                        : Colors.transparent,
                     width: 4,
                   ),
                 ),
@@ -201,14 +260,33 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(dateStr, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: isSelected ? const Color(0xFF0284C7) : ClinicalColors.textPrimary)),
-                      Text(timeStr, style: const TextStyle(fontSize: 11, color: ClinicalColors.textMuted)),
+                      Text(
+                        dateStr,
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                          color: isSelected
+                              ? const Color(0xFF0284C7)
+                              : ClinicalColors.textPrimary,
+                        ),
+                      ),
+                      Text(
+                        timeStr,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: ClinicalColors.textMuted,
+                        ),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 4),
                   Text(
                     'Dx: ${v.diagnosisText}',
-                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: ClinicalColors.deepCocoa),
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: ClinicalColors.deepCocoa,
+                    ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -216,13 +294,22 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
                   Row(
                     children: [
                       if (v.sbp != null && v.dbp != null) ...[
-                        Text('BP: ${v.sbp}/${v.dbp}', style: const TextStyle(fontSize: 11, color: ClinicalColors.textMuted)),
+                        Text(
+                          'BP: ${v.sbp}/${v.dbp}',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: ClinicalColors.textMuted,
+                          ),
+                        ),
                         const SizedBox(width: 8),
                       ],
                       Expanded(
                         child: Text(
                           v.doctorName,
-                          style: const TextStyle(fontSize: 11, color: ClinicalColors.textMuted),
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: ClinicalColors.textMuted,
+                          ),
                           textAlign: TextAlign.end,
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -238,7 +325,10 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
     );
   }
 
-  Widget _buildVisitsDropdown(List<OpdVisitModel> visits, OpdVisitModel currentVisit) {
+  Widget _buildVisitsDropdown(
+    List<OpdVisitModel> visits,
+    OpdVisitModel currentVisit,
+  ) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14),
       decoration: BoxDecoration(
@@ -251,10 +341,14 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
           value: currentVisit.id,
           isExpanded: true,
           items: visits.map((v) {
-            final dateStr = '${v.visitDate.day}/${v.visitDate.month}/${v.visitDate.year + 543}';
+            final dateStr =
+                '${v.visitDate.day}/${v.visitDate.month}/${v.visitDate.year + 543}';
             return DropdownMenuItem(
               value: v.id,
-              child: Text('$dateStr - Dx: ${v.diagnosisText} (${v.doctorName})', style: const TextStyle(fontSize: 13)),
+              child: Text(
+                '$dateStr - Dx: ${v.diagnosisText} (${v.doctorName})',
+                style: const TextStyle(fontSize: 13),
+              ),
             );
           }).toList(),
           onChanged: (val) {
@@ -266,12 +360,33 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
   }
 
   Widget _buildOpdCardDetail(OpdVisitModel v) {
-    final dateStr = '${v.visitDate.day}/${v.visitDate.month}/${v.visitDate.year + 543}';
-    final timeStr = '${v.visitDate.hour.toString().padLeft(2, '0')}:${v.visitDate.minute.toString().padLeft(2, '0')} น.';
+    final dateStr =
+        '${v.visitDate.day}/${v.visitDate.month}/${v.visitDate.year + 543}';
+    final timeStr =
+        '${v.visitDate.hour.toString().padLeft(2, '0')}:${v.visitDate.minute.toString().padLeft(2, '0')} น.';
+    final consultation = v.consultationSnapshot;
+    final redFlags = consultation?['red_flags'];
+    final missingInformation = consultation?['missing_information'];
+    final nextSteps = consultation?['next_steps'];
+    final observations = consultation?['observations'];
+    final observationText = observations is Map
+        ? observations.entries
+              .where(
+                (entry) =>
+                    entry.value != null &&
+                    entry.value.toString().trim().isNotEmpty,
+              )
+              .map((entry) => '${entry.key}: ${entry.value}')
+              .join(' | ')
+        : '';
 
     // ดึงชื่อคลินิกจาก Provider
-    final facilityDetail = ref.watch(currentFacilityDetailProvider).asData?.value;
+    final facilityDetail = ref
+        .watch(currentFacilityDetailProvider)
+        .asData
+        ?.value;
     final clinicName = facilityDetail?.facilityName ?? 'คลินิกเวชกรรม';
+    final clinicalResults = ref.watch(encounterClinicalResultsProvider(v.id));
 
     return Container(
       padding: const EdgeInsets.all(24),
@@ -284,7 +399,7 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
             color: Colors.black.withValues(alpha: 0.03),
             blurRadius: 10,
             offset: const Offset(0, 4),
-          )
+          ),
         ],
       ),
       child: Column(
@@ -301,23 +416,53 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
                   children: [
                     Row(
                       children: [
-                        Text('บันทึกการตรวจวันที่: $dateStr ($timeStr)',
-                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: ClinicalColors.textPrimary)),
+                        Text(
+                          'บันทึกการตรวจวันที่: $dateStr ($timeStr)',
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: ClinicalColors.textPrimary,
+                          ),
+                        ),
                         const SizedBox(width: 10),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF10B981).withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(6),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 2,
                           ),
-                          child: const Text('เสร็จสิ้น (COMPLETED)',
-                              style: TextStyle(color: Color(0xFF059669), fontSize: 11, fontWeight: FontWeight.bold)),
+                          decoration: BoxDecoration(
+                            color: v.encounterStatus == 'open'
+                                ? const Color(0xFFFFF7ED)
+                                : const Color(0xFF10B981)
+                                      .withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(6),
+                            border: v.encounterStatus == 'open'
+                                ? Border.all(color: const Color(0xFFF97316))
+                                : null,
+                          ),
+                          child: Text(
+                            v.encounterStatus == 'open'
+                                ? 'เปิดอยู่ (OPEN)'
+                                : 'ปิดแล้ว (CLOSED)',
+                            style: TextStyle(
+                              color: v.encounterStatus == 'open'
+                                  ? const Color(0xFFC2410C)
+                                  : const Color(0xFF059669),
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
                         ),
                       ],
                     ),
                     const SizedBox(height: 4),
-                    Text('แพทย์ผู้ตรวจรักษา: ${v.doctorName}',
-                        style: const TextStyle(fontSize: 13, color: ClinicalColors.textMuted)),
+                    Text(
+                      'แพทย์ผู้ตรวจรักษา: ${v.doctorName}',
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: ClinicalColors.textMuted,
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -335,12 +480,28 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
                         visit: v,
                       );
                     },
-                    icon: const Icon(Icons.receipt_long_rounded, size: 16, color: Color(0xFF059669)),
-                    label: const Text('พิมพ์ใบสั่งยา (Rx)', style: TextStyle(fontSize: 12, color: Color(0xFF059669), fontWeight: FontWeight.bold)),
+                    icon: const Icon(
+                      Icons.receipt_long_rounded,
+                      size: 16,
+                      color: Color(0xFF059669),
+                    ),
+                    label: const Text(
+                      'พิมพ์ใบสั่งยา (Rx)',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Color(0xFF059669),
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                     style: OutlinedButton.styleFrom(
                       side: const BorderSide(color: Color(0xFF059669)),
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
                     ),
                   ),
                   ElevatedButton.icon(
@@ -353,13 +514,24 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
                       );
                     },
                     icon: const Icon(Icons.print_rounded, size: 16),
-                    label: const Text('พิมพ์ใบตรวจ (OPD)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                    label: const Text(
+                      'พิมพ์ใบตรวจ (OPD)',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF0284C7),
                       foregroundColor: Colors.white,
                       elevation: 0,
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
                     ),
                   ),
                 ],
@@ -372,32 +544,65 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
 
           // 1. สัญญาณชีพ (Vital Signs Snapshot)
           if (v.sbp != null || v.temperature != null || v.weightKg != null) ...[
-            const Text('สัญญาณชีพแรกรับ (Vital Signs Snapshot)',
-                style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: ClinicalColors.deepCocoa)),
+            const Text(
+              'สัญญาณชีพแรกรับ (Vital Signs Snapshot)',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.bold,
+                color: ClinicalColors.deepCocoa,
+              ),
+            ),
             const SizedBox(height: 10),
             Wrap(
               spacing: 12,
               runSpacing: 8,
               children: [
                 if (v.sbp != null && v.dbp != null)
-                  _buildSnapshotChip('BP', '${v.sbp}/${v.dbp} mmHg', Icons.favorite_outline),
+                  _buildSnapshotChip(
+                    'BP',
+                    '${v.sbp}/${v.dbp} mmHg',
+                    Icons.favorite_outline,
+                  ),
                 if (v.pulse != null)
-                  _buildSnapshotChip('ชีพจร', '${v.pulse} bpm', Icons.monitor_heart_outlined),
+                  _buildSnapshotChip(
+                    'ชีพจร',
+                    '${v.pulse} bpm',
+                    Icons.monitor_heart_outlined,
+                  ),
                 if (v.temperature != null)
-                  _buildSnapshotChip('อุณหภูมิ', '${v.temperature} °C', Icons.thermostat_outlined),
+                  _buildSnapshotChip(
+                    'อุณหภูมิ',
+                    '${v.temperature} °C',
+                    Icons.thermostat_outlined,
+                  ),
                 if (v.respiratoryRate != null)
-                  _buildSnapshotChip('อัตราหายใจ', '${v.respiratoryRate} /min', Icons.air_outlined),
+                  _buildSnapshotChip(
+                    'อัตราหายใจ',
+                    '${v.respiratoryRate} /min',
+                    Icons.air_outlined,
+                  ),
                 if (v.weightKg != null)
-                  _buildSnapshotChip('น้ำหนัก', '${v.weightKg} kg', Icons.scale_outlined),
+                  _buildSnapshotChip(
+                    'น้ำหนัก',
+                    '${v.weightKg} kg',
+                    Icons.scale_outlined,
+                  ),
                 if (v.heightCm != null)
-                  _buildSnapshotChip('ส่วนสูง', '${v.heightCm} cm', Icons.height_outlined),
+                  _buildSnapshotChip(
+                    'ส่วนสูง',
+                    '${v.heightCm} cm',
+                    Icons.height_outlined,
+                  ),
               ],
             ),
             const SizedBox(height: 20),
           ],
 
           // 2. การซักประวัติ (History Taking)
-          _buildSectionHeader('1. การซักประวัติ (History Taking)', Icons.history_edu_rounded),
+          _buildSectionHeader(
+            '1. การซักประวัติ (History Taking)',
+            Icons.history_edu_rounded,
+          ),
           const SizedBox(height: 10),
           _buildInfoRow('อาการสำคัญ (CC)', v.chiefComplaint, isBold: true),
           if (v.presentIllness != null && v.presentIllness!.isNotEmpty)
@@ -407,10 +612,35 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
           if (v.medicationAllergy != null && v.medicationAllergy!.isNotEmpty)
             _buildInfoRow('ประวัติแพ้ยา', v.medicationAllergy!, isAlert: true),
 
+          if (consultation != null) ...[
+            const SizedBox(height: 20),
+            _buildSectionHeader(
+              'ข้อมูลจากการปรึกษาเบื้องต้น',
+              Icons.support_agent_rounded,
+            ),
+            const SizedBox(height: 10),
+            if (observationText.isNotEmpty)
+              _buildInfoRow('ข้อมูลที่รายงาน', observationText),
+            if (redFlags is List && redFlags.isNotEmpty)
+              _buildInfoRow('สัญญาณเตือน', redFlags.join(', '), isAlert: true),
+            if (missingInformation is List && missingInformation.isNotEmpty)
+              _buildInfoRow(
+                'ข้อมูลที่ควรซักเพิ่มเติม',
+                missingInformation.join(', '),
+              ),
+            if (nextSteps is List && nextSteps.isNotEmpty)
+              _buildInfoRow('ขั้นตอนถัดไป', nextSteps.join('\n')),
+          ],
+
+          _buildEncounterClinicalResults(clinicalResults, v.id),
+
           const SizedBox(height: 20),
 
           // 3. การตรวจร่างกาย (Physical Examination)
-          _buildSectionHeader('2. การตรวจร่างกาย (Physical Examination: PE)', Icons.accessibility_new_rounded),
+          _buildSectionHeader(
+            '2. การตรวจร่างกาย (Physical Examination: PE)',
+            Icons.accessibility_new_rounded,
+          ),
           const SizedBox(height: 10),
           Container(
             padding: const EdgeInsets.all(14),
@@ -438,27 +668,43 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
           const SizedBox(height: 20),
 
           // 4. การวินิจฉัยโรค (Assessment & Diagnosis)
-          _buildSectionHeader('3. การวินิจฉัยโรค (Diagnosis)', Icons.assignment_turned_in_rounded),
+          _buildSectionHeader(
+            '3. การวินิจฉัยโรค (Diagnosis)',
+            Icons.assignment_turned_in_rounded,
+          ),
           const SizedBox(height: 10),
           Row(
             children: [
               Expanded(
                 child: Text(
                   v.diagnosisText,
-                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: ClinicalColors.textPrimary),
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: ClinicalColors.textPrimary,
+                  ),
                 ),
               ),
               if (v.icd10Code != null && v.icd10Code!.isNotEmpty)
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 4,
+                  ),
                   decoration: BoxDecoration(
                     color: const Color(0xFF0284C7).withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: const Color(0xFF0284C7).withValues(alpha: 0.3)),
+                    border: Border.all(
+                      color: const Color(0xFF0284C7).withValues(alpha: 0.3),
+                    ),
                   ),
                   child: Text(
                     'ICD-10: ${v.icd10Code}',
-                    style: const TextStyle(color: Color(0xFF0284C7), fontWeight: FontWeight.bold, fontSize: 13),
+                    style: const TextStyle(
+                      color: Color(0xFF0284C7),
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13,
+                    ),
                   ),
                 ),
             ],
@@ -467,7 +713,10 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
           const SizedBox(height: 20),
 
           // 5. แผนการรักษาและสั่งยา (Plan & Orders)
-          _buildSectionHeader('4. คำสั่งการรักษา & รายการยา (Plan & Prescriptions)', Icons.medication_rounded),
+          _buildSectionHeader(
+            '4. คำสั่งการรักษา & รายการยา (Plan & Prescriptions)',
+            Icons.medication_rounded,
+          ),
           const SizedBox(height: 10),
           if (v.treatmentPlan != null && v.treatmentPlan!.isNotEmpty)
             _buildInfoRow('คำแนะนำ/แผนการดูแล', v.treatmentPlan!),
@@ -484,14 +733,25 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('รายการยาที่สั่งจ่าย (Rx):',
-                      style: TextStyle(color: Color(0xFF059669), fontWeight: FontWeight.bold, fontSize: 13)),
+                  const Text(
+                    'รายการยาที่สั่งจ่าย (Rx):',
+                    style: TextStyle(
+                      color: Color(0xFF059669),
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13,
+                    ),
+                  ),
                   const SizedBox(height: 6),
                   for (var item in v.prescriptions)
                     Padding(
                       padding: const EdgeInsets.symmetric(vertical: 2),
-                      child: Text('• ${item['item_name'] ?? item.toString()}',
-                          style: const TextStyle(color: ClinicalColors.deepCocoa, fontSize: 13)),
+                      child: Text(
+                        '• ${item['item_name'] ?? item.toString()}',
+                        style: const TextStyle(
+                          color: ClinicalColors.deepCocoa,
+                          fontSize: 13,
+                        ),
+                      ),
                     ),
                 ],
               ),
@@ -500,6 +760,111 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
         ],
       ),
     );
+  }
+
+  Widget _buildEncounterClinicalResults(
+    AsyncValue<EncounterClinicalResults> resultsAsync,
+    String encounterId,
+  ) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 20),
+        _buildSectionHeader(
+          'ผลตรวจที่ผูกกับ encounter นี้',
+          Icons.biotech_outlined,
+        ),
+        const SizedBox(height: 10),
+        resultsAsync.when(
+          loading: () => const LinearProgressIndicator(),
+          error: (error, _) => Row(
+            children: [
+              Expanded(child: Text('โหลดผลตรวจไม่สำเร็จ: $error')),
+              TextButton(
+                onPressed: () => ref.invalidate(
+                  encounterClinicalResultsProvider(encounterId),
+                ),
+                child: const Text('ลองใหม่'),
+              ),
+            ],
+          ),
+          data: (results) {
+            if (results.isEmpty) {
+              return const Text(
+                'ยังไม่มีสัญญาณชีพหรือผลตรวจเพิ่มเติมใน encounter นี้',
+                style: TextStyle(color: ClinicalColors.textMuted, fontSize: 13),
+              );
+            }
+
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (final vital in results.vitalSigns)
+                  _buildInfoRow(
+                    'สัญญาณชีพ (${vital['recorded_at'] ?? 'ไม่ระบุเวลา'})',
+                    [
+                      if (vital['systolic'] != null &&
+                          vital['diastolic'] != null)
+                        'BP ${vital['systolic']}/${vital['diastolic']} mmHg',
+                      if (vital['pulse'] != null) 'ชีพจร ${vital['pulse']} bpm',
+                      if (vital['temperature'] != null)
+                        'อุณหภูมิ ${vital['temperature']} °C',
+                      if (vital['respiratory_rate'] != null)
+                        'อัตราหายใจ ${vital['respiratory_rate']} /min',
+                      if (vital['weight_kg'] != null)
+                        'น้ำหนัก ${vital['weight_kg']} kg',
+                      if (vital['height_cm'] != null)
+                        'ส่วนสูง ${vital['height_cm']} cm',
+                      if (vital['spoken_feedback']?.toString().isNotEmpty ==
+                          true)
+                        'อาการ: ${vital['spoken_feedback']}',
+                    ].join(' | '),
+                  ),
+                for (final lab in results.labResults)
+                  _buildInfoRow(
+                    '${lab['test_type'] ?? 'ผลตรวจ'} (${lab['lab_date'] ?? 'ไม่ระบุวันที่'})',
+                    _formatLabResult(lab),
+                  ),
+              ],
+            );
+          },
+        ),
+      ],
+    );
+  }
+
+  String _formatLabResult(Map<String, dynamic> lab) {
+    const fields = <String, String>{
+      'fbs': 'FBS',
+      'hba1c': 'HbA1c',
+      'cholesterol': 'Cholesterol',
+      'triglycerides': 'Triglycerides',
+      'hdl': 'HDL',
+      'ldl': 'LDL',
+      'bun': 'BUN',
+      'creatinine': 'Creatinine',
+      'egfr': 'eGFR',
+      'sodium': 'Na',
+      'potassium': 'K',
+      'chloride': 'Cl',
+      'bicarbonate': 'Bicarbonate',
+      'ast': 'AST',
+      'alt': 'ALT',
+      'alp': 'ALP',
+      'uric_acid': 'Uric acid',
+      'urine_microalbumin': 'UACR',
+      'urine_protein': 'Urine protein',
+    };
+    final measurements = fields.entries
+        .where((field) => lab[field.key] != null)
+        .map((field) => '${field.value}: ${lab[field.key]}')
+        .join(' | ');
+    final interpretation =
+        lab['clinical_interpretation']?.toString().trim() ?? '';
+    return [
+      measurements,
+      interpretation,
+    ].where((value) => value.isNotEmpty).join('\n');
   }
 
   Widget _buildEmptyState(BuildContext context) {
@@ -515,12 +880,20 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
                 color: const Color(0xFF0284C7).withValues(alpha: 0.1),
                 shape: BoxShape.circle,
               ),
-              child: const Icon(Icons.note_alt_outlined, color: Color(0xFF0284C7), size: 48),
+              child: const Icon(
+                Icons.note_alt_outlined,
+                color: Color(0xFF0284C7),
+                size: 48,
+              ),
             ),
             const SizedBox(height: 18),
             const Text(
               'ยังไม่มีประวัติการตรวจรักษาผู้ป่วยนอก (OPD Visits)',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: ClinicalColors.textPrimary),
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: ClinicalColors.textPrimary,
+              ),
             ),
             const SizedBox(height: 8),
             const Text(
@@ -531,12 +904,20 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
             ElevatedButton.icon(
               onPressed: () => _openNewEncounterDialog(context),
               icon: const Icon(Icons.add_rounded, size: 20),
-              label: const Text('บันทึกการตรวจรักษาครั้งแรก', style: TextStyle(fontWeight: FontWeight.bold)),
+              label: const Text(
+                'บันทึกการตรวจรักษาครั้งแรก',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF0284C7),
                 foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 14,
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
               ),
             ),
           ],
@@ -545,7 +926,10 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
     );
   }
 
-  void _openNewEncounterDialog(BuildContext context) {
+  void _openNewEncounterDialog(
+    BuildContext context, {
+    OpdVisitModel? existingEncounter,
+  }) {
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -555,8 +939,11 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
         sbp: widget.latestSbp,
         dbp: widget.latestDbp,
         pulse: widget.latestPulse,
+        existingEncounter: existingEncounter,
         onSaved: () {
           ref.invalidate(patientOpdVisitsProvider(widget.patientId));
+          ref.invalidate(patientDetailProvider(widget.patientId));
+          ref.invalidate(patientTimelineProvider(widget.patientId));
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text('บันทึกเวชระเบียนการตรวจรักษา (OPD Visit) สำเร็จ'),
@@ -573,24 +960,42 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
       children: [
         Icon(icon, size: 18, color: const Color(0xFF0284C7)),
         const SizedBox(width: 8),
-        Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: ClinicalColors.deepCocoa)),
+        Text(
+          title,
+          style: const TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.bold,
+            color: ClinicalColors.deepCocoa,
+          ),
+        ),
       ],
     );
   }
 
-  Widget _buildInfoRow(String label, String value, {bool isBold = false, bool isAlert = false}) {
+  Widget _buildInfoRow(
+    String label,
+    String value, {
+    bool isBold = false,
+    bool isAlert = false,
+  }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: RichText(
         text: TextSpan(
-          style: const TextStyle(fontSize: 14, color: Color(0xFF0F172A), height: 1.6), // 👈 ขยายเป็น 14px
+          style: const TextStyle(
+            fontSize: 14,
+            color: Color(0xFF0F172A),
+            height: 1.6,
+          ), // 👈 ขยายเป็น 14px
           children: [
             TextSpan(
               text: '$label: ',
               style: TextStyle(
                 fontWeight: FontWeight.bold,
                 fontSize: 14,
-                color: isAlert ? ClinicalColors.criticalRed : const Color(0xFF475569),
+                color: isAlert
+                    ? ClinicalColors.criticalRed
+                    : const Color(0xFF475569),
               ),
             ),
             TextSpan(
@@ -598,7 +1003,9 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
               style: TextStyle(
                 fontWeight: isBold ? FontWeight.bold : FontWeight.w500,
                 fontSize: 14,
-                color: isAlert ? ClinicalColors.criticalRed : const Color(0xFF0F172A),
+                color: isAlert
+                    ? ClinicalColors.criticalRed
+                    : const Color(0xFF0F172A),
               ),
             ),
           ],
@@ -615,10 +1022,24 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
         children: [
           SizedBox(
             width: 120,
-            child: Text(system, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Color(0xFF475569))),
+            child: Text(
+              system,
+              style: const TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 13,
+                color: Color(0xFF475569),
+              ),
+            ),
           ),
           Expanded(
-            child: Text(finding, style: const TextStyle(fontSize: 14, color: Color(0xFF0F172A), fontWeight: FontWeight.w500)),
+            child: Text(
+              finding,
+              style: const TextStyle(
+                fontSize: 14,
+                color: Color(0xFF0F172A),
+                fontWeight: FontWeight.w500,
+              ),
+            ),
           ),
         ],
       ),
@@ -638,8 +1059,21 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
         children: [
           Icon(icon, size: 14, color: ClinicalColors.textMuted),
           const SizedBox(width: 6),
-          Text('$label: ', style: const TextStyle(fontSize: 12, color: ClinicalColors.textMuted)),
-          Text(value, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: ClinicalColors.textPrimary)),
+          Text(
+            '$label: ',
+            style: const TextStyle(
+              fontSize: 12,
+              color: ClinicalColors.textMuted,
+            ),
+          ),
+          Text(
+            value,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              color: ClinicalColors.textPrimary,
+            ),
+          ),
         ],
       ),
     );

@@ -14,6 +14,7 @@ import '../../triage/domain/care_gap_rules.dart';
 import '../../triage/domain/triage_rules.dart';
 import '../data/triage_repository.dart';
 import '../../triage/domain/medication_safety_rules.dart';
+import '../data/clinical_entry_repository.dart';
 import '../data/opd_visit_repository.dart';
 import 'widgets/clinical_record_entry_dialog.dart';
 import 'widgets/opd_encounter_dialog.dart';
@@ -1409,6 +1410,17 @@ class _PatientDetailScreenState extends ConsumerState<PatientDetailScreen>
   ) {
     final name =
         p['name'] ?? '${p['first_name'] ?? ''} ${p['last_name'] ?? ''}';
+    String listText(Object? value) => value is List
+        ? value
+              .map((item) => item.toString())
+              .where((item) => item.isNotEmpty)
+              .join(', ')
+        : '';
+    final drugAllergyStatus = p['drug_allergy_status']?.toString() ?? 'unknown';
+    final foodAllergyStatus = p['food_allergy_status']?.toString() ?? 'unknown';
+    final drugAllergies = listText(p['drug_allergies']);
+    final foodAllergies = listText(p['food_allergies']);
+    final medicationRiskConditions = listText(p['medication_risk_conditions']);
     final latestVital = vitals.isNotEmpty ? vitals.first : <String, dynamic>{};
     final sbp = (latestVital['systolic'] as num?)?.toInt();
     final dbp = (latestVital['diastolic'] as num?)?.toInt();
@@ -1468,6 +1480,45 @@ class _PatientDetailScreenState extends ConsumerState<PatientDetailScreen>
                       ),
                       overflow: TextOverflow.ellipsis,
                     ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'ประวัติแพ้ยา: ${drugAllergyStatus == 'none'
+                          ? 'ยืนยันว่าไม่มี'
+                          : drugAllergyStatus == 'has_allergy'
+                          ? drugAllergies
+                          : 'ยังไม่ทราบ'}',
+                      style: TextStyle(
+                        color: drugAllergyStatus == 'has_allergy'
+                            ? ClinicalColors.criticalRed
+                            : drugAllergyStatus == 'unknown'
+                            ? const Color(0xFFB45309)
+                            : ClinicalColors.textMuted,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    if (foodAllergyStatus != 'none' || foodAllergies.isNotEmpty)
+                      Text(
+                        'ประวัติแพ้อาหาร: ${foodAllergyStatus == 'has_allergy' ? foodAllergies : 'ยังไม่ทราบ'}',
+                        style: const TextStyle(
+                          color: ClinicalColors.textMuted,
+                          fontSize: 12,
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    if (medicationRiskConditions.isNotEmpty)
+                      Text(
+                        'ภาวะที่มีผลต่อการใช้ยา: $medicationRiskConditions',
+                        style: const TextStyle(
+                          color: ClinicalColors.deepCocoa,
+                          fontSize: 12,
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                   ],
                 ),
               ),
@@ -1491,30 +1542,12 @@ class _PatientDetailScreenState extends ConsumerState<PatientDetailScreen>
                     vertical: 10,
                   ),
                 ),
-                onPressed: () {
-                  showDialog(
-                    context: context,
-                    builder: (ctx) => ClinicalRecordEntryDialog(
-                      patientId: widget.patientId,
-                      patientName: name,
-                      onSaved: () {
-                        ref.invalidate(patientDetailProvider(widget.patientId));
-                        ref.invalidate(
-                          patientTimelineProvider(widget.patientId),
-                        );
-                        ref.invalidate(triageOverviewProvider);
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text(
-                              'บันทึกผลตรวจและส่งเข้าประวัติผู้ป่วยเรียบร้อยแล้ว',
-                            ),
-                            backgroundColor: ClinicalColors.primaryEmerald,
-                          ),
-                        );
-                      },
-                    ),
-                  );
-                },
+                onPressed: () => _openClinicalRecordEntryDialog(
+                  patientName: name,
+                  sbp: sbp,
+                  dbp: dbp,
+                  pulse: pulse,
+                ),
                 icon: const Icon(Icons.add_chart_rounded, size: 18),
                 label: const Text(
                   'บันทึกผลตรวจ',
@@ -1534,32 +1567,11 @@ class _PatientDetailScreenState extends ConsumerState<PatientDetailScreen>
                   ),
                 ),
                 onPressed: () {
-                  showDialog(
-                    context: context,
-                    barrierDismissible: false,
-                    builder: (ctx) => OpdEncounterDialog(
-                      patientId: widget.patientId,
-                      patientName: name,
-                      sbp: sbp,
-                      dbp: dbp,
-                      pulse: pulse,
-                      onSaved: () {
-                        ref.invalidate(
-                          patientOpdVisitsProvider(widget.patientId),
-                        );
-                        ref.invalidate(
-                          patientTimelineProvider(widget.patientId),
-                        );
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text(
-                              'บันทึกเวชระเบียนการตรวจรักษา (OPD Visit) เรียบร้อยแล้ว',
-                            ),
-                            backgroundColor: ClinicalColors.primaryEmerald,
-                          ),
-                        );
-                      },
-                    ),
+                  _openOpdEncounterDialog(
+                    patientName: name,
+                    sbp: sbp,
+                    dbp: dbp,
+                    pulse: pulse,
                   );
                 },
                 icon: const Icon(Icons.medical_services_rounded, size: 18),
@@ -2500,6 +2512,137 @@ class _PatientDetailScreenState extends ConsumerState<PatientDetailScreen>
                 ),
           ],
         ],
+      ),
+    );
+  }
+
+  Future<void> _openClinicalRecordEntryDialog({
+    required String patientName,
+    required int? sbp,
+    required int? dbp,
+    required int? pulse,
+  }) async {
+    List<OpdVisitModel> visits;
+    try {
+      visits = await ref.read(
+        patientOpdVisitsProvider(widget.patientId).future,
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('โหลด OPD encounter ไม่สำเร็จ: $error')),
+      );
+      return;
+    }
+
+    OpdVisitModel? openEncounter;
+    for (final visit in visits) {
+      if (visit.encounterStatus == 'open') {
+        openEncounter = visit;
+        break;
+      }
+    }
+    if (!mounted) return;
+
+    if (openEncounter == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text(
+            'กรุณาเปิด OPD encounter ก่อน เพื่อผูกผลตรวจเข้ากับการรักษาครั้งนี้',
+          ),
+          action: SnackBarAction(
+            label: 'เปิด OPD',
+            onPressed: () => _openOpdEncounterDialog(
+              patientName: patientName,
+              sbp: sbp,
+              dbp: dbp,
+              pulse: pulse,
+            ),
+          ),
+        ),
+      );
+      return;
+    }
+
+    final date = openEncounter.visitDate;
+    final encounterLabel =
+        '${date.day}/${date.month}/${date.year + 543} - ${openEncounter.diagnosisText}';
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => ClinicalRecordEntryDialog(
+        patientId: widget.patientId,
+        patientName: patientName,
+        encounterId: openEncounter!.id,
+        encounterLabel: encounterLabel,
+        onSaved: () {
+          ref.invalidate(patientOpdVisitsProvider(widget.patientId));
+          ref.invalidate(encounterClinicalResultsProvider(openEncounter!.id));
+          ref.invalidate(patientLabHistoryProvider(widget.patientId));
+          ref.invalidate(patientDetailProvider(widget.patientId));
+          ref.invalidate(patientTimelineProvider(widget.patientId));
+          ref.invalidate(triageOverviewProvider);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('บันทึกผลตรวจใน OPD encounter เรียบร้อยแล้ว'),
+              backgroundColor: ClinicalColors.primaryEmerald,
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Future<void> _openOpdEncounterDialog({
+    required String patientName,
+    required int? sbp,
+    required int? dbp,
+    required int? pulse,
+  }) async {
+    List<OpdVisitModel> visits;
+    try {
+      visits = await ref.read(
+        patientOpdVisitsProvider(widget.patientId).future,
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('โหลด OPD encounter ไม่สำเร็จ: $error')),
+      );
+      return;
+    }
+
+    OpdVisitModel? openEncounter;
+    for (final visit in visits) {
+      if (visit.encounterStatus == 'open') {
+        openEncounter = visit;
+        break;
+      }
+    }
+    if (!mounted) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => OpdEncounterDialog(
+        patientId: widget.patientId,
+        patientName: patientName,
+        sbp: sbp,
+        dbp: dbp,
+        pulse: pulse,
+        existingEncounter: openEncounter,
+        onSaved: () {
+          ref.invalidate(patientOpdVisitsProvider(widget.patientId));
+          ref.invalidate(patientDetailProvider(widget.patientId));
+          ref.invalidate(patientTimelineProvider(widget.patientId));
+          ref.invalidate(triageOverviewProvider);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('บันทึก OPD encounter เรียบร้อยแล้ว'),
+              backgroundColor: ClinicalColors.primaryEmerald,
+            ),
+          );
+        },
       ),
     );
   }

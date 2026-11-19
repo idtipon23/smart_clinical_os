@@ -30,12 +30,72 @@ final patientLabHistoryProvider =
       return List<Map<String, dynamic>>.from(response);
     });
 
+class EncounterClinicalResults {
+  final List<Map<String, dynamic>> vitalSigns;
+  final List<Map<String, dynamic>> labResults;
+
+  const EncounterClinicalResults({
+    required this.vitalSigns,
+    required this.labResults,
+  });
+
+  bool get isEmpty => vitalSigns.isEmpty && labResults.isEmpty;
+}
+
+final encounterClinicalResultsProvider = FutureProvider.autoDispose
+    .family<EncounterClinicalResults, String>((ref, encounterId) async {
+      return ref
+          .watch(clinicalEntryRepositoryProvider)
+          .fetchEncounterResults(encounterId);
+    });
+
 class ClinicalEntryRepository {
   final SupabaseClient _client;
   ClinicalEntryRepository(this._client);
 
+  Future<EncounterClinicalResults> fetchEncounterResults(
+    String encounterId,
+  ) async {
+    final vitalSigns = await _client
+        .from('vital_signs')
+        .select('*')
+        .eq('opd_visit_id', encounterId)
+        .order('recorded_at', ascending: false);
+    final labResults = await _client
+        .from('lab_results')
+        .select('*')
+        .eq('opd_visit_id', encounterId)
+        .order('lab_date', ascending: false);
+
+    return EncounterClinicalResults(
+      vitalSigns: List<Map<String, dynamic>>.from(vitalSigns),
+      labResults: List<Map<String, dynamic>>.from(labResults),
+    );
+  }
+
+  Future<void> _requireOpenEncounter(
+    String encounterId,
+    String patientId,
+  ) async {
+    final encounter = await _client
+        .from('opd_visits')
+        .select('patient_id, encounter_status')
+        .eq('id', encounterId)
+        .single();
+
+    if (encounter['patient_id']?.toString() != patientId) {
+      throw StateError('OPD encounter does not belong to this patient.');
+    }
+    if (encounter['encounter_status'] != 'open') {
+      throw StateError(
+        'Clinical results can only be added to an open encounter.',
+      );
+    }
+  }
+
   /// 1. บันทึกสัญญาณชีพและอาการ (V/S & Symptoms)
   Future<void> saveVitalSigns({
+    required String encounterId,
     required String patientId,
     required int systolic,
     required int diastolic,
@@ -46,6 +106,8 @@ class ClinicalEntryRepository {
     double? heightCm,
     String? symptomsOrFeedback,
   }) async {
+    await _requireOpenEncounter(encounterId, patientId);
+
     final user = _client.auth.currentUser;
     final staffName =
         user?.userMetadata?['full_name'] ??
@@ -65,6 +127,7 @@ class ClinicalEntryRepository {
     }
 
     await _client.from('vital_signs').insert({
+      'opd_visit_id': encounterId,
       'patient_id': patientId,
       'systolic': systolic,
       'diastolic': diastolic,
@@ -84,6 +147,7 @@ class ClinicalEntryRepository {
         '${symptomsOrFeedback != null && symptomsOrFeedback.isNotEmpty ? ' | อาการ: $symptomsOrFeedback' : ''}';
 
     await _client.from('staff_notes').insert({
+      'opd_visit_id': encounterId,
       'patient_id': patientId,
       'staff_name': staffName,
       'note_text': vitalSummary,
@@ -93,6 +157,7 @@ class ClinicalEntryRepository {
 
   /// 2. บันทึกผลแล็บครบวงจร (Comprehensive Lab Results)
   Future<void> saveLabResults({
+    required String encounterId,
     required String patientId,
     required DateTime labDate,
     // Glycemic
@@ -123,6 +188,8 @@ class ClinicalEntryRepository {
     String? interpretation,
     String? imageUrl,
   }) async {
+    await _requireOpenEncounter(encounterId, patientId);
+
     final user = _client.auth.currentUser;
     final staffName =
         user?.userMetadata?['full_name'] ??
@@ -131,6 +198,7 @@ class ClinicalEntryRepository {
         'เจ้าหน้าที่ชันสูตร';
 
     final payload = _withoutNullValues({
+      'opd_visit_id': encounterId,
       'patient_id': patientId,
       'lab_date': labDate.toIso8601String().split('T').first,
       'test_date': DateTime.now().toUtc().toIso8601String(),
@@ -175,12 +243,15 @@ class ClinicalEntryRepository {
 
   /// 3. บันทึกผลการตรวจ X-Ray หรือ EKG พร้อมภาพแนบ
   Future<void> saveDiagnosticImaging({
+    required String encounterId,
     required String patientId,
     required String testType, // 'XRAY' หรือ 'EKG'
     required DateTime examDate,
     required String interpretation,
     String? imageUrl,
   }) async {
+    await _requireOpenEncounter(encounterId, patientId);
+
     final user = _client.auth.currentUser;
     final staffName =
         user?.userMetadata?['full_name'] ??
@@ -189,6 +260,7 @@ class ClinicalEntryRepository {
         'แพทย์/เจ้าหน้าที่รังสี';
 
     await _client.from('lab_results').insert({
+      'opd_visit_id': encounterId,
       'patient_id': patientId,
       'lab_date': examDate.toIso8601String().split('T').first,
       'test_type': testType,
@@ -202,6 +274,7 @@ class ClinicalEntryRepository {
         : 'คลื่นไฟฟ้าหัวใจ (EKG 12-Lead)';
 
     await _client.from('staff_notes').insert({
+      'opd_visit_id': encounterId,
       'patient_id': patientId,
       'staff_name': staffName,
       'note_text': '[$testNameThai] $interpretation',

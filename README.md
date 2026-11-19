@@ -30,26 +30,85 @@ use only the publishable/anon key, never a Supabase `service_role` key. Keep
 LINE provider secrets in Supabase Edge Function secrets for `line-notifier`,
 not in Vercel or the client app.
 
-For Gemini clinical suggestions, add `GEMINI_API_KEY` as a Vercel environment
-variable for Preview and Production, then redeploy. The key is used only by the
-server-side `/api/gemini-consult` function and must not be added as a Flutter
-`--dart-define`. The function uses `gemini-3.5-flash-lite`, requires a signed-in
-Supabase user, and sends the consultation fields to Google's Gemini API after
-the user confirms. The app does not send selected-patient identifiers, but
-free-text fields are forwarded as entered; remove names, IDs, phone numbers,
-and other identifying details before sending. AI output is advisory, is not
-saved automatically, and must be reviewed by a clinician.
+Gemini requests run only after a clinician explicitly clicks an AI action.
+Deploy the two Supabase Edge Functions separately from the Flutter/Vercel
+deployment:
+
+```shell
+supabase functions deploy ai-workup-suggest --project-ref <project-ref>
+supabase functions deploy ai-medication-safety --project-ref <project-ref>
+```
+
+Set `GEMINI_API_KEY` as a Supabase Edge Function secret; optionally set
+`GEMINI_MODEL` to a supported Gemini Flash model. The default is
+`gemini-2.5-flash`. Never put the Gemini key in Vercel or a Flutter
+`--dart-define`. Both functions require a valid Supabase user session and return
+structured JSON.
+
+Stage 1 is the **ขอคำแนะนำการตรวจเพิ่มเติม (AI Workup)** action in the general
+consultation screen. It returns red flags, differential considerations,
+recommended physical exams, and investigations; it does not recommend
+medications. Stage 2 is the **ตรวจทานความปลอดภัยของยา (AI)** action in the OPD
+prescription form. It reviews allergies/cross-allergies, interactions,
+comorbidities, and dose-related concerns. It does not prescribe, change a
+prescription, or calculate pediatric doses. Closing an Encounter does not call
+AI.
+
+The client and Edge Functions allowlist only age, gender, V/S, complaints,
+underlying diseases, drug allergies, current medications, recent labs, and new
+prescriptions. Before invoking an Edge Function, the client removes identifiers
+from the selected patient profile and scrubs common ID/phone/address patterns;
+each Edge Function independently re-allowlists the fields and scrubs those
+patterns again. Review free text before confirming; AI output remains advisory
+and must be checked by the clinician. Images are not sent in either stage.
+
 Use real patient information only where the clinic has approved this external
 processing and applicable privacy requirements are met.
 In the app, open **ปรึกษา Gemini (การแพทย์ทั่วไป)**, select a patient, enter
-the consultation details, and choose **ส่งปรึกษา Gemini 3.5 Flash Lite**.
+the consultation details, and explicitly choose **ขอคำแนะนำการตรวจเพิ่มเติม
+(AI Workup)**. Stage 2 is available in the OPD prescription form after entering
+a diagnosis and prescription.
+
+## Prepare the database for OPD encounters
+
+Before deploying the clinical workflow, run the SQL migrations in
+`supabase/migrations/` in filename order in the SQL Editor for the intended
+Supabase project. The OPD migration
+[`20261119134500_unify_consultation_opd_encounters.sql`](supabase/migrations/20261119134500_unify_consultation_opd_encounters.sql)
+expects the
+existing `opd_visits`, `vital_signs`, `lab_results`, and `staff_notes` tables;
+it is a feature migration, not a complete database setup. Existing OPD visits
+are marked closed. New consultations create open encounters, and vital signs,
+lab results, imaging results, and related staff notes are linked to an
+encounter. The patient-history migration adds medication/food allergy status
+and medication-risk-condition fields; legacy patients default to
+“unknown/unscreened,” not “no allergy.” Verify the target project and back up
+its database before applying migrations.
 
 This codebase expects the existing table/view names and columns used by its
 repositories, including `patients`, `vital_signs`, `cdss_events`, and
-`staff_notes`. It does not currently include customer-specific database
-migrations or RLS setup. Provision and verify the schema, storage policies,
-tenant isolation, and the `line-notifier` Edge Function in each customer
-project before deployment.
+`staff_notes`. The included migrations extend the existing schema; they are
+not a complete database setup. Provision and verify the full schema, storage
+policies, tenant isolation, and the `line-notifier` Edge Function in each
+customer project before deployment.
+
+## Clinic medication and procedure catalog
+
+After confirming the target Supabase project and backing up its database, run
+the migrations in filename order. This includes
+[`20261119152000_clinic_catalogs_and_opd_orders.sql`](supabase/migrations/20261119152000_clinic_catalogs_and_opd_orders.sql),
+which adds facility-scoped medication/procedure catalogs and structured OPD
+fields. Its nullable `ai_final_review` column is retained for compatibility
+with databases where the earlier workflow migration has already run; the
+two-stage AI workflow no longer reads or writes that field.
+
+The catalog tables are not shipped with clinic-specific prices or stock.
+Populate them using each facility's approved formulary and procedure list,
+after verifying facility scoping and existing catalog rows. Do not reuse
+another clinic's prices. Verify NLEM editions and drug-specific pediatric dose
+references with a qualified clinician before relying on catalog notes;
+pediatric automatic dose calculation remains disabled unless verified
+drug-specific rules and an IBW protocol are configured.
 
 Patient communications continue to use the existing `line_user_id` mapping
 and `line-notifier` function. Do not remove or rename these interfaces if

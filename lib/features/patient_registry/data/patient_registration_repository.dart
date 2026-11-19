@@ -1,11 +1,13 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
 import '../../auth/data/staff_auth_repository.dart';
 
-final patientRegistrationRepositoryProvider = Provider<PatientRegistrationRepository>((ref) {
-  return PatientRegistrationRepository(Supabase.instance.client, ref);
-});
+final patientRegistrationRepositoryProvider =
+    Provider<PatientRegistrationRepository>((ref) {
+      return PatientRegistrationRepository(Supabase.instance.client, ref);
+    });
 
 class PatientRegistrationParams {
   final String? hn;
@@ -15,6 +17,11 @@ class PatientRegistrationParams {
   final String gender;
   final String? phone;
   final String? underlyingDiseases;
+  final String drugAllergyStatus;
+  final List<String> drugAllergies;
+  final String foodAllergyStatus;
+  final List<String> foodAllergies;
+  final List<String> medicationRiskConditions;
   final String patientCategory;
   final double? weightKg;
   final double? heightCm;
@@ -27,6 +34,11 @@ class PatientRegistrationParams {
     required this.gender,
     this.phone,
     this.underlyingDiseases,
+    required this.drugAllergyStatus,
+    required this.drugAllergies,
+    required this.foodAllergyStatus,
+    required this.foodAllergies,
+    required this.medicationRiskConditions,
     this.patientCategory = 'GENERAL',
     this.weightKg,
     this.heightCm,
@@ -39,14 +51,19 @@ class PatientRegistrationRepository {
 
   PatientRegistrationRepository(this._client, this._ref);
 
-  Future<Map<String, dynamic>> registerPatient(PatientRegistrationParams params) async {
+  Future<Map<String, dynamic>> registerPatient(
+    PatientRegistrationParams params,
+  ) async {
     // 1. ดึงข้อมูล Facility ID ของเจ้าหน้าที่ที่กำลังล็อกอินอยู่
     final staffProfile = await _ref.read(currentStaffProfileProvider.future);
-    final facilityId = staffProfile?.facilityId ?? '8f560a00-9b32-4185-a193-4c8afd4e2eb7';
+    final facilityId =
+        staffProfile?.facilityId ?? '8f560a00-9b32-4185-a193-4c8afd4e2eb7';
 
     // 2. คำนวณ BMI หากระบุน้ำหนักและส่วนสูง
     String? bmi;
-    if (params.weightKg != null && params.heightCm != null && params.heightCm! > 0) {
+    if (params.weightKg != null &&
+        params.heightCm != null &&
+        params.heightCm! > 0) {
       final hMeters = params.heightCm! / 100;
       final bmiVal = params.weightKg! / (hMeters * hMeters);
       bmi = bmiVal.toStringAsFixed(1);
@@ -56,9 +73,10 @@ class PatientRegistrationRepository {
     String finalHn = params.hn?.trim() ?? '';
     if (finalHn.isEmpty) {
       try {
-        final hnRes = await _client.rpc('generate_clinic_hn', params: {
-          'p_facility_id': facilityId,
-        });
+        final hnRes = await _client.rpc(
+          'generate_clinic_hn',
+          params: {'p_facility_id': facilityId},
+        );
         finalHn = hnRes?.toString() ?? '';
       } catch (e) {
         debugPrint('⚠️ Error calling generate_clinic_hn RPC: $e');
@@ -76,8 +94,15 @@ class PatientRegistrationRepository {
       'name': '${params.firstName.trim()} ${params.lastName.trim()}',
       'age': params.age,
       'gender': params.gender,
-      'phone': params.phone?.trim().isNotEmpty == true ? params.phone!.trim() : null,
+      'phone': params.phone?.trim().isNotEmpty == true
+          ? params.phone!.trim()
+          : null,
       'underlying_diseases': params.underlyingDiseases ?? 'ไม่มีโรคประจำตัว',
+      'drug_allergy_status': params.drugAllergyStatus,
+      'drug_allergies': params.drugAllergies,
+      'food_allergy_status': params.foodAllergyStatus,
+      'food_allergies': params.foodAllergies,
+      'medication_risk_conditions': params.medicationRiskConditions,
       'patient_category': params.patientCategory,
       'weight_kg': params.weightKg?.toString(),
       'height_cm': params.heightCm?.toString(),
@@ -93,13 +118,16 @@ class PatientRegistrationRepository {
           .select()
           .single();
 
-      debugPrint('✅ สร้างเวชระเบียนผู้ป่วยใหม่สำเร็จ: ${response['id']} (HN: $finalHn, Facility: $facilityId)');
+      debugPrint(
+        '✅ สร้างเวชระเบียนผู้ป่วยใหม่สำเร็จ: ${response['id']} (HN: $finalHn, Facility: $facilityId)',
+      );
       return response;
     } catch (e) {
       debugPrint('❌ เกิดข้อผิดพลาดในการลงทะเบียนผู้ป่วย: $e');
       rethrow;
     }
   }
+
   /// ยืนยันรหัสผ่านเจ้าของคลินิก/แพทย์ แล้วสั่งลบข้อมูลผู้ป่วยทั้งหมด
   Future<void> deletePatientWithReAuth({
     required String patientId,
@@ -126,9 +154,10 @@ class PatientRegistrationRepository {
 
     // 2. เรียก Database Function เพื่อล้างข้อมูลผู้ป่วยและประวัติที่เกี่ยวข้องทั้งหมด
     try {
-      await _client.rpc('admin_delete_patient', params: {
-        'p_patient_id': patientId,
-      });
+      await _client.rpc(
+        'admin_delete_patient',
+        params: {'p_patient_id': patientId},
+      );
       debugPrint('🗑️ ลบข้อมูลเวชระเบียนผู้ป่วย $patientId สำเร็จ');
     } catch (e) {
       debugPrint('❌ ไม่สามารถลบข้อมูลผู้ป่วยได้: $e');

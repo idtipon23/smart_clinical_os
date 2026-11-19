@@ -24,10 +24,15 @@ class _PatientRegistrationDialogState
   final _phoneController = TextEditingController();
   final _weightController = TextEditingController();
   final _heightController = TextEditingController();
-  final _diseasesController = TextEditingController(text: 'HT');
+  final _diseasesController = TextEditingController();
+  final _drugAllergyController = TextEditingController();
+  final _foodAllergyController = TextEditingController();
+  final _medicationConditionsController = TextEditingController();
 
   String _selectedGender = 'ชาย';
-  String _selectedCategory = 'HT';
+  String _selectedCategory = 'GENERAL';
+  String _drugAllergyStatus = 'unknown';
+  String _foodAllergyStatus = 'unknown';
   bool _isLoading = false;
 
   @override
@@ -40,8 +45,18 @@ class _PatientRegistrationDialogState
     _weightController.dispose();
     _heightController.dispose();
     _diseasesController.dispose();
+    _drugAllergyController.dispose();
+    _foodAllergyController.dispose();
+    _medicationConditionsController.dispose();
     super.dispose();
   }
+
+  List<String> _entriesFromLines(String value) => value
+      .split('\n')
+      .map((entry) => entry.trim())
+      .where((entry) => entry.isNotEmpty)
+      .toSet()
+      .toList();
 
   Future<void> _submitRegistration() async {
     if (!_formKey.currentState!.validate()) return;
@@ -58,7 +73,20 @@ class _PatientRegistrationDialogState
         age: int.parse(_ageController.text.trim()),
         gender: _selectedGender,
         phone: _phoneController.text.trim(),
-        underlyingDiseases: _diseasesController.text.trim(),
+        underlyingDiseases: _diseasesController.text.trim().isEmpty
+            ? 'ยังไม่ทราบ'
+            : _diseasesController.text.trim(),
+        drugAllergyStatus: _drugAllergyStatus,
+        drugAllergies: _drugAllergyStatus == 'has_allergy'
+            ? _entriesFromLines(_drugAllergyController.text)
+            : const [],
+        foodAllergyStatus: _foodAllergyStatus,
+        foodAllergies: _foodAllergyStatus == 'has_allergy'
+            ? _entriesFromLines(_foodAllergyController.text)
+            : const [],
+        medicationRiskConditions: _entriesFromLines(
+          _medicationConditionsController.text,
+        ),
         patientCategory: _selectedCategory,
         weightKg: double.tryParse(_weightController.text.trim()),
         heightCm: double.tryParse(_heightController.text.trim()),
@@ -343,10 +371,37 @@ class _PatientRegistrationDialogState
                       child: _buildTextField(
                         label: 'โรคประจำตัว',
                         controller: _diseasesController,
-                        hint: 'เช่น HT, DLP, เกาต์',
+                        hint: 'เช่น HT, DLP, เกาต์; เว้นว่างหากยังไม่ทราบ',
                       ),
                     ),
                   ],
+                ),
+                const SizedBox(height: 28),
+
+                _buildAllergyEntry(
+                  label: 'ประวัติแพ้ยา',
+                  status: _drugAllergyStatus,
+                  onStatusChanged: (value) =>
+                      setState(() => _drugAllergyStatus = value),
+                  controller: _drugAllergyController,
+                  hint:
+                      'หนึ่งรายการต่อบรรทัด เช่น penicillin - ผื่น/หายใจลำบาก',
+                ),
+                const SizedBox(height: 16),
+                _buildAllergyEntry(
+                  label: 'ประวัติแพ้อาหาร',
+                  status: _foodAllergyStatus,
+                  onStatusChanged: (value) =>
+                      setState(() => _foodAllergyStatus = value),
+                  controller: _foodAllergyController,
+                  hint: 'หนึ่งรายการต่อบรรทัด พร้อมอาการที่เคยเกิด',
+                ),
+                const SizedBox(height: 16),
+                _buildTextField(
+                  label: 'โรค/ภาวะที่มีผลต่อการใช้ยา',
+                  controller: _medicationConditionsController,
+                  hint: 'หนึ่งรายการต่อบรรทัด เช่น G6PD deficiency, DM, HIV, มะเร็ง/เคมีบำบัด, PU',
+                  maxLines: 3,
                 ),
                 const SizedBox(height: 28),
 
@@ -406,6 +461,7 @@ class _PatientRegistrationDialogState
     String? hint,
     TextInputType keyboardType = TextInputType.text,
     String? Function(String?)? validator,
+    int maxLines = 1,
   }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -419,9 +475,59 @@ class _PatientRegistrationDialogState
           controller: controller,
           keyboardType: keyboardType,
           validator: validator,
+          maxLines: maxLines,
           style: const TextStyle(color: Colors.white, fontSize: 14),
           decoration: _inputDecoration(hint: hint),
         ),
+      ],
+    );
+  }
+
+  Widget _buildAllergyEntry({
+    required String label,
+    required String status,
+    required ValueChanged<String> onStatusChanged,
+    required TextEditingController controller,
+    required String hint,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(color: Color(0xFF94A3B8), fontSize: 12),
+        ),
+        const SizedBox(height: 6),
+        DropdownButtonFormField<String>(
+          value: status,
+          dropdownColor: const Color(0xFF0F172A),
+          style: const TextStyle(color: Colors.white, fontSize: 14),
+          decoration: _inputDecoration(),
+          items: const [
+            DropdownMenuItem(
+              value: 'unknown',
+              child: Text('ยังไม่ทราบ / ยังไม่ได้ซักประวัติ'),
+            ),
+            DropdownMenuItem(
+              value: 'none',
+              child: Text('ยืนยันว่าไม่มีประวัติแพ้'),
+            ),
+            DropdownMenuItem(value: 'has_allergy', child: Text('มีประวัติแพ้')),
+          ],
+          onChanged: (value) => onStatusChanged(value ?? 'unknown'),
+        ),
+        if (status == 'has_allergy') ...[
+          const SizedBox(height: 8),
+          TextFormField(
+            controller: controller,
+            maxLines: 3,
+            validator: (value) => value == null || value.trim().isEmpty
+                ? 'กรุณาระบุรายการแพ้และอาการที่เคยเกิด'
+                : null,
+            style: const TextStyle(color: Colors.white, fontSize: 14),
+            decoration: _inputDecoration(hint: hint),
+          ),
+        ],
       ],
     );
   }
