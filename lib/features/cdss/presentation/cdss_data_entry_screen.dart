@@ -1,8 +1,10 @@
 // lib/features/cdss/presentation/cdss_data_entry_screen.dart
 
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:http/http.dart' as http;
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/constants/clinical_theme.dart';
@@ -15,7 +17,8 @@ class CdssDataEntryScreen extends ConsumerStatefulWidget {
   const CdssDataEntryScreen({super.key});
 
   @override
-  ConsumerState<CdssDataEntryScreen> createState() => _CdssDataEntryScreenState();
+  ConsumerState<CdssDataEntryScreen> createState() =>
+      _CdssDataEntryScreenState();
 }
 
 class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
@@ -39,7 +42,10 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
 
   final Set<String> _selectedRedFlags = {};
   GeneralMedicalConsultResult? _cdssResult;
+  String? _geminiRecommendation;
   bool _isSaving = false;
+  bool _isGeminiLoading = false;
+  int _inputRevision = 0;
 
   List<TextEditingController> get _inputControllers => [
     _complaintController,
@@ -68,8 +74,15 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
   }
 
   void _clearStaleConsultResult() {
-    if (_cdssResult != null) {
-      setState(() => _cdssResult = null);
+    _inputRevision++;
+    if (_cdssResult != null ||
+        _geminiRecommendation != null ||
+        _isGeminiLoading) {
+      setState(() {
+        _cdssResult = null;
+        _geminiRecommendation = null;
+        _isGeminiLoading = false;
+      });
     }
   }
 
@@ -98,9 +111,12 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
 
   void _onPatientSelected(PatientTriageModel? patient) {
     if (patient == null) return;
-    _cdssResult = null;
+    _inputRevision++;
     setState(() {
       _selectedPatient = patient;
+      _cdssResult = null;
+      _geminiRecommendation = null;
+      _isGeminiLoading = false;
       _complaintController.clear();
       _onsetController.clear();
       _symptomsController.clear();
@@ -121,6 +137,7 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
   }
 
   void _evaluateCdss() {
+    _inputRevision++;
     final observations = <String, String>{
       'blood_pressure': [
         _sbpController.text.trim(),
@@ -136,6 +153,8 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
     };
 
     setState(() {
+      _geminiRecommendation = null;
+      _isGeminiLoading = false;
       _cdssResult = GeneralMedicalConsultEngine.evaluate(
         GeneralMedicalConsultInput(
           chiefComplaint: _complaintController.text,
@@ -151,13 +170,127 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
     });
   }
 
+  Future<void> _requestGeminiRecommendation() async {
+    if (_selectedPatient == null || _cdssResult == null || _isGeminiLoading) {
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('ส่งข้อมูลให้ Gemini?'),
+        content: const Text(
+          'ระบบจะส่งอาการ ประวัติ ยา ประวัติแพ้ยา สัญญาณชีพ ผลตรวจ และอาการเตือนที่กรอกไปยัง Google Gemini API '
+          'ระบบไม่ส่งชื่อหรือรหัสจากข้อมูลผู้ป่วยที่เลือก แต่ข้อความอิสระจะถูกส่งตามที่กรอก โปรดลบข้อมูลระบุตัวบุคคลก่อนส่ง '
+          'คำตอบเป็นเพียงข้อมูลประกอบการพิจารณา และไม่ควรรอคำตอบ AI หากเป็นเหตุฉุกเฉิน',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('ยกเลิก'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('ยืนยันส่งข้อมูล'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final accessToken =
+        Supabase.instance.client.auth.currentSession?.accessToken;
+    if (accessToken == null || accessToken.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('กรุณาเข้าสู่ระบบใหม่ก่อนใช้ Gemini')),
+      );
+      return;
+    }
+
+    final revision = _inputRevision;
+    final result = _cdssResult!;
+    final requestBody = {
+      'consultation': {
+        'chief_complaint': _complaintController.text.trim(),
+        'onset': _onsetController.text.trim(),
+        'symptoms': _symptomsController.text.trim(),
+        'medical_history': _historyController.text.trim(),
+        'medications': _medicationsController.text.trim(),
+        'allergies': _allergiesController.text.trim(),
+        'observations': {
+          'blood_pressure': [
+            _sbpController.text.trim(),
+            _dbpController.text.trim(),
+          ].where((value) => value.isNotEmpty).join('/'),
+          'pulse': _pulseController.text.trim(),
+          'temperature': _temperatureController.text.trim(),
+          'respiratory_rate': _respiratoryRateController.text.trim(),
+          'oxygen_saturation': _oxygenSaturationController.text.trim(),
+          'weight': _weightController.text.trim(),
+          'height': _heightController.text.trim(),
+          'lab_summary': _labSummaryController.text.trim(),
+        },
+        'red_flags': _selectedRedFlags.toList(),
+        'priority': result.priority.name,
+      },
+    };
+
+    setState(() {
+      _isGeminiLoading = true;
+      _geminiRecommendation = null;
+    });
+
+    try {
+      final response = await http
+          .post(
+            Uri.base.resolve('/api/gemini-consult'),
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer $accessToken',
+            },
+            body: jsonEncode(requestBody),
+          )
+          .timeout(const Duration(seconds: 30));
+
+      if (!mounted || revision != _inputRevision) return;
+
+      final responseBody = jsonDecode(response.body);
+      if (response.statusCode != 200 ||
+          responseBody is! Map<String, dynamic> ||
+          responseBody['recommendation'] is! String) {
+        final message =
+            responseBody is Map<String, dynamic> &&
+                responseBody['error'] is String
+            ? responseBody['error'] as String
+            : 'ไม่สามารถรับคำแนะนำจาก Gemini ได้';
+        throw Exception(message);
+      }
+
+      setState(() {
+        _geminiRecommendation = (responseBody['recommendation'] as String)
+            .trim();
+      });
+    } catch (error) {
+      if (mounted && revision == _inputRevision) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('ขอคำแนะนำจาก Gemini ไม่สำเร็จ: $error')),
+        );
+      }
+    } finally {
+      if (mounted && revision == _inputRevision) {
+        setState(() => _isGeminiLoading = false);
+      }
+    }
+  }
+
   Future<void> _saveAssessment() async {
     if (_selectedPatient == null || _cdssResult == null) return;
     setState(() => _isSaving = true);
 
     final client = Supabase.instance.client;
     final user = client.auth.currentUser;
-    final staffName = user?.userMetadata?['full_name'] ??
+    final staffName =
+        user?.userMetadata?['full_name'] ??
         user?.userMetadata?['name'] ??
         user?.email ??
         'พยาบาลวิชาชีพเวชปฏิบัติ';
@@ -263,10 +396,15 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
       backgroundColor: ClinicalColors.canvasBg,
       body: triageAsync.when(
         loading: () => const Center(
-          child: CircularProgressIndicator(color: ClinicalColors.primaryEmerald),
+          child: CircularProgressIndicator(
+            color: ClinicalColors.primaryEmerald,
+          ),
         ),
         error: (err, _) => Center(
-          child: Text('เกิดข้อผิดพลาด: $err', style: const TextStyle(color: ClinicalColors.criticalRed)),
+          child: Text(
+            'เกิดข้อผิดพลาด: $err',
+            style: const TextStyle(color: ClinicalColors.criticalRed),
+          ),
         ),
         data: (patients) {
           return SingleChildScrollView(
@@ -280,12 +418,19 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
                   children: [
                     Text(
                       'เวิร์กสเปซปรึกษาทางการแพทย์ทั่วไป',
-                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: ClinicalColors.textPrimary),
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: ClinicalColors.textPrimary,
+                      ),
                     ),
                     SizedBox(height: 4),
                     Text(
                       'บันทึกอาการ ประวัติ สัญญาณชีพ และอาการเตือน เพื่อช่วยจัดลำดับการประเมินโดยบุคลากรทางการแพทย์',
-                      style: TextStyle(fontSize: 12.5, color: ClinicalColors.textMuted),
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        color: ClinicalColors.textMuted,
+                      ),
                     ),
                   ],
                 ),
@@ -306,7 +451,10 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
                           children: [
                             Expanded(flex: 5, child: _buildVitalsAndLabCard()),
                             const SizedBox(width: 20),
-                            Expanded(flex: 5, child: _buildClinicalFlagsAndMedsCard()),
+                            Expanded(
+                              flex: 5,
+                              child: _buildClinicalFlagsAndMedsCard(),
+                            ),
                           ],
                         );
                       } else {
@@ -327,11 +475,19 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
                     style: FilledButton.styleFrom(
                       backgroundColor: ClinicalColors.primaryEmerald,
                       padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
                     ),
                     onPressed: _evaluateCdss,
                     icon: const Icon(Icons.analytics_rounded, size: 18),
-                    label: const Text('สรุปการคัดกรองและข้อมูลที่ต้องติดตาม', style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.bold)),
+                    label: const Text(
+                      'สรุปการคัดกรองและข้อมูลที่ต้องติดตาม',
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                   ),
                   const SizedBox(height: 20),
 
@@ -360,59 +516,93 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
         children: [
           const Row(
             children: [
-              Icon(Icons.person_search_rounded, color: ClinicalColors.totalBlue, size: 20),
+              Icon(
+                Icons.person_search_rounded,
+                color: ClinicalColors.totalBlue,
+                size: 20,
+              ),
               SizedBox(width: 8),
-              Text('1. เลือกผู้ป่วยสำหรับคัดกรอง / ประเมิน (Select Patient)', style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.bold)),
+              Text(
+                '1. เลือกผู้ป่วยสำหรับคัดกรอง / ประเมิน (Select Patient)',
+                style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.bold),
+              ),
             ],
           ),
           const SizedBox(height: 12),
           Autocomplete<PatientTriageModel>(
-            displayStringForOption: (p) => '${p.fullName} (${p.hn ?? 'ไม่มี HN'})',
+            displayStringForOption: (p) =>
+                '${p.fullName} (${p.hn ?? 'ไม่มี HN'})',
             optionsBuilder: (textEditingValue) {
               if (textEditingValue.text.isEmpty) {
                 return patients.take(8);
               }
               final q = textEditingValue.text.toLowerCase();
-              return patients.where((p) => p.fullName.toLowerCase().contains(q) || (p.hn?.toLowerCase().contains(q) ?? false));
-            },
-            onSelected: _onPatientSelected,
-            fieldViewBuilder: (context, controller, focusNode, onEditingComplete) {
-              return TextField(
-                controller: controller,
-                focusNode: focusNode,
-                decoration: const InputDecoration(
-                  hintText: 'พิมพ์ค้นหาชื่อ-นามสกุล หรือ HN ผู้ป่วย...',
-                  prefixIcon: Icon(Icons.search_rounded, size: 18),
-                  isDense: true,
-                  border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(8))),
-                ),
+              return patients.where(
+                (p) =>
+                    p.fullName.toLowerCase().contains(q) ||
+                    (p.hn?.toLowerCase().contains(q) ?? false),
               );
             },
+            onSelected: _onPatientSelected,
+            fieldViewBuilder:
+                (context, controller, focusNode, onEditingComplete) {
+                  return TextField(
+                    controller: controller,
+                    focusNode: focusNode,
+                    decoration: const InputDecoration(
+                      hintText: 'พิมพ์ค้นหาชื่อ-นามสกุล หรือ HN ผู้ป่วย...',
+                      prefixIcon: Icon(Icons.search_rounded, size: 18),
+                      isDense: true,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.all(Radius.circular(8)),
+                      ),
+                    ),
+                  );
+                },
           ),
           if (_selectedPatient != null) ...[
             const SizedBox(height: 12),
             Container(
               padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(color: const Color(0xFFF0FDF4), borderRadius: BorderRadius.circular(8), border: Border.all(color: const Color(0xFFBBF7D0))),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF0FDF4),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFBBF7D0)),
+              ),
               child: Row(
                 children: [
-                  const Icon(Icons.check_circle_rounded, color: ClinicalColors.normalGreen, size: 18),
+                  const Icon(
+                    Icons.check_circle_rounded,
+                    color: ClinicalColors.normalGreen,
+                    size: 18,
+                  ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
                       'ผู้ป่วย: ${_selectedPatient!.fullName} | HN: ${_selectedPatient!.hn ?? "-"} | อายุ: ${_selectedPatient!.age ?? "-"} ปี | โรค: ${_selectedPatient!.underlyingDiseases ?? "-"}',
-                      style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Color(0xFF166534)),
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF166534),
+                      ),
                     ),
                   ),
                   TextButton.icon(
                     onPressed: () {
                       Navigator.push(
                         context,
-                        MaterialPageRoute(builder: (_) => PatientDetailScreen(patientId: _selectedPatient!.patientId)),
+                        MaterialPageRoute(
+                          builder: (_) => PatientDetailScreen(
+                            patientId: _selectedPatient!.patientId,
+                          ),
+                        ),
                       );
                     },
                     icon: const Icon(Icons.open_in_new_rounded, size: 14),
-                    label: const Text('ดูประวัติเดิม', style: TextStyle(fontSize: 12)),
+                    label: const Text(
+                      'ดูประวัติเดิม',
+                      style: TextStyle(fontSize: 12),
+                    ),
                   ),
                 ],
               ),
@@ -437,9 +627,16 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
         children: [
           const Row(
             children: [
-              Icon(Icons.monitor_heart_rounded, color: ClinicalColors.primaryEmerald, size: 20),
+              Icon(
+                Icons.monitor_heart_rounded,
+                color: ClinicalColors.primaryEmerald,
+                size: 20,
+              ),
               SizedBox(width: 8),
-              Text('สัญญาณชีพและผลตรวจที่เกี่ยวข้อง', style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.bold)),
+              Text(
+                'สัญญาณชีพและผลตรวจที่เกี่ยวข้อง',
+                style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.bold),
+              ),
             ],
           ),
           const SizedBox(height: 16),
@@ -458,7 +655,11 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
             runSpacing: 10,
             children: [
               _numberField(_temperatureController, 'อุณหภูมิ', '°C'),
-              _numberField(_respiratoryRateController, 'อัตราหายใจ', 'ครั้ง/นาที'),
+              _numberField(
+                _respiratoryRateController,
+                'อัตราหายใจ',
+                'ครั้ง/นาที',
+              ),
               _numberField(_oxygenSaturationController, 'SpO₂', '%'),
               _numberField(_weightController, 'น้ำหนัก', 'กก.'),
               _numberField(_heightController, 'ส่วนสูง', 'ซม.'),
@@ -470,7 +671,8 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
             maxLines: 2,
             decoration: const InputDecoration(
               labelText: 'ผลตรวจ/ข้อมูลเพิ่มเติม',
-              hintText: 'เช่น ผลแล็บ ภาพถ่าย หรือผลตรวจที่เกี่ยวข้องกับอาการครั้งนี้',
+              hintText:
+                  'เช่น ผลแล็บ ภาพถ่าย หรือผลตรวจที่เกี่ยวข้องกับอาการครั้งนี้',
               isDense: true,
               border: OutlineInputBorder(),
             ),
@@ -514,9 +716,16 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
         children: [
           const Row(
             children: [
-              Icon(Icons.assignment_ind_rounded, color: ClinicalColors.totalBlue, size: 20),
+              Icon(
+                Icons.assignment_ind_rounded,
+                color: ClinicalColors.totalBlue,
+                size: 20,
+              ),
               SizedBox(width: 8),
-              Text('อาการสำคัญและประวัติทางคลินิก', style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.bold)),
+              Text(
+                'อาการสำคัญและประวัติทางคลินิก',
+                style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.bold),
+              ),
             ],
           ),
           const SizedBox(height: 14),
@@ -545,7 +754,8 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
             maxLines: 3,
             decoration: const InputDecoration(
               labelText: 'รายละเอียดอาการและอาการร่วม',
-              hintText: 'ลักษณะ ความรุนแรง ตำแหน่ง ปัจจัยกระตุ้น/บรรเทา และอาการร่วม',
+              hintText:
+                  'ลักษณะ ความรุนแรง ตำแหน่ง ปัจจัยกระตุ้น/บรรเทา และอาการร่วม',
               isDense: true,
               border: OutlineInputBorder(),
             ),
@@ -660,7 +870,10 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
                     children: [
                       const Text(
                         'สรุปการคัดกรองทางคลินิก',
-                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
                       Text(
                         priorityLabel,
@@ -675,10 +888,14 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
                 ],
               ),
               FilledButton.icon(
-                style: FilledButton.styleFrom(backgroundColor: ClinicalColors.primaryEmerald),
+                style: FilledButton.styleFrom(
+                  backgroundColor: ClinicalColors.primaryEmerald,
+                ),
                 onPressed: _isSaving ? null : _saveAssessment,
                 icon: const Icon(Icons.save_rounded, size: 16),
-                label: Text(_isSaving ? 'กำลังบันทึก...' : 'บันทึกคำสั่งการลงเวชระเบียน'),
+                label: Text(
+                  _isSaving ? 'กำลังบันทึก...' : 'บันทึกคำสั่งการลงเวชระเบียน',
+                ),
               ),
             ],
           ),
@@ -726,7 +943,10 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
                 padding: const EdgeInsets.symmetric(vertical: 2),
                 child: Text(
                   '• $item',
-                  style: const TextStyle(fontSize: 12, color: ClinicalColors.textMuted),
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: ClinicalColors.textMuted,
+                  ),
                 ),
               ),
             ),
@@ -743,12 +963,67 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('• ', style: TextStyle(color: ClinicalColors.primaryEmerald)),
-                  Expanded(child: Text(step, style: const TextStyle(fontSize: 12.5))),
+                  const Text(
+                    '• ',
+                    style: TextStyle(color: ClinicalColors.primaryEmerald),
+                  ),
+                  Expanded(
+                    child: Text(step, style: const TextStyle(fontSize: 12.5)),
+                  ),
                 ],
               ),
             ),
           ),
+          const SizedBox(height: 16),
+          OutlinedButton.icon(
+            onPressed: _isGeminiLoading ? null : _requestGeminiRecommendation,
+            icon: _isGeminiLoading
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.auto_awesome_rounded, size: 18),
+            label: Text(
+              _isGeminiLoading
+                  ? 'กำลังขอคำแนะนำ...'
+                  : 'ขอคำแนะนำจาก Gemini 3.5 Flash Lite',
+            ),
+          ),
+          if (_geminiRecommendation != null) ...[
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: ClinicalColors.primaryEmerald.withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: ClinicalColors.primaryEmerald.withValues(alpha: 0.25),
+                ),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'คำแนะนำจาก Gemini 3.5 Flash Lite — โปรดทบทวน',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  SelectableText(_geminiRecommendation!),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'ผลลัพธ์ AI ยังไม่ถูกบันทึกลงเวชระเบียนโดยอัตโนมัติ',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: ClinicalColors.textMuted,
+                      fontStyle: FontStyle.italic,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
           const SizedBox(height: 12),
           const Text(
             'ระบบไม่วินิจฉัยโรคและไม่เสนอการสั่งยา ผู้ประกอบวิชาชีพต้องประเมินผู้ป่วยและใช้ดุลยพินิจทางคลินิก',

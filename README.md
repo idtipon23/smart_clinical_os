@@ -30,6 +30,18 @@ use only the publishable/anon key, never a Supabase `service_role` key. Keep
 LINE provider secrets in Supabase Edge Function secrets for `line-notifier`,
 not in Vercel or the client app.
 
+For Gemini clinical suggestions, add `GEMINI_API_KEY` as a Vercel environment
+variable for Preview and Production, then redeploy. The key is used only by the
+server-side `/api/gemini-consult` function and must not be added as a Flutter
+`--dart-define`. The function uses `gemini-3.5-flash-lite`, requires a signed-in
+Supabase user, and sends the consultation fields to Google's Gemini API after
+the user confirms. The app does not send selected-patient identifiers, but
+free-text fields are forwarded as entered; remove names, IDs, phone numbers,
+and other identifying details before sending. AI output is advisory, is not
+saved automatically, and must be reviewed by a clinician.
+Use real patient information only where the clinic has approved this external
+processing and applicable privacy requirements are met.
+
 This codebase expects the existing table/view names and columns used by its
 repositories, including `patients`, `vital_signs`, `cdss_events`, and
 `staff_notes`. It does not currently include customer-specific database
