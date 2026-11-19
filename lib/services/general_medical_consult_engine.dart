@@ -105,4 +105,55 @@ class GeneralMedicalConsultEngine {
       nextSteps: nextSteps,
     );
   }
+
+  static String formatClinicalNote({
+    required GeneralMedicalConsultInput input,
+    required GeneralMedicalConsultResult result,
+  }) {
+    const observationLabels = {
+      'blood_pressure': 'ความดันโลหิต',
+      'pulse': 'ชีพจร',
+      'temperature': 'อุณหภูมิ',
+      'respiratory_rate': 'อัตราการหายใจ',
+      'oxygen_saturation': 'ออกซิเจนปลายนิ้ว',
+      'weight': 'น้ำหนัก',
+      'height': 'ส่วนสูง',
+      'lab_summary': 'ผลตรวจ',
+    };
+
+    final observations = input.observations.entries
+        .where((entry) => entry.value.trim().isNotEmpty)
+        .map(
+          (entry) =>
+              '${observationLabels[entry.key] ?? entry.key}: ${entry.value.trim()}',
+        )
+        .join(', ');
+    final priorityLabel = switch (result.priority) {
+      ConsultPriority.emergency => 'ต้องประเมินฉุกเฉิน',
+      ConsultPriority.promptReview => 'ข้อมูลยังไม่ครบ',
+      ConsultPriority.routineReview => 'รอผู้ประกอบวิชาชีพประเมิน',
+    };
+
+    return [
+      'บันทึกการปรึกษาทางการแพทย์ทั่วไป',
+      'ระดับการประเมิน: $priorityLabel',
+      if (input.chiefComplaint.trim().isNotEmpty)
+        'อาการสำคัญ: ${input.chiefComplaint.trim()}',
+      if (input.onset.trim().isNotEmpty) 'เริ่มมีอาการ: ${input.onset.trim()}',
+      if (input.symptoms.trim().isNotEmpty)
+        'รายละเอียดอาการ: ${input.symptoms.trim()}',
+      if (input.medicalHistory.trim().isNotEmpty)
+        'ประวัติโรคประจำตัว: ${input.medicalHistory.trim()}',
+      if (input.medications.trim().isNotEmpty)
+        'ยาที่ใช้อยู่: ${input.medications.trim()}',
+      if (input.allergies.trim().isNotEmpty)
+        'ประวัติแพ้ยา/อาหาร: ${input.allergies.trim()}',
+      if (observations.isNotEmpty) 'สัญญาณชีพ/ผลตรวจ: $observations',
+      if (input.redFlags.isNotEmpty)
+        'อาการเตือน: ${input.redFlags.join(', ')}',
+      if (result.missingInformation.isNotEmpty)
+        'ข้อมูลที่ควรเก็บเพิ่ม: ${result.missingInformation.join(', ')}',
+      'ขั้นตอนถัดไป: ${result.nextSteps.join('; ')}',
+    ].join('\n');
+  }
 }

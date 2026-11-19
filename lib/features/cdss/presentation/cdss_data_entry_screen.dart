@@ -41,6 +41,7 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
   final _labSummaryController = TextEditingController();
 
   final Set<String> _selectedRedFlags = {};
+  GeneralMedicalConsultInput? _consultationInput;
   GeneralMedicalConsultResult? _cdssResult;
   String? _geminiRecommendation;
   bool _isSaving = false;
@@ -79,6 +80,7 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
         _geminiRecommendation != null ||
         _isGeminiLoading) {
       setState(() {
+        _consultationInput = null;
         _cdssResult = null;
         _geminiRecommendation = null;
         _isGeminiLoading = false;
@@ -114,6 +116,7 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
     _inputRevision++;
     setState(() {
       _selectedPatient = patient;
+      _consultationInput = null;
       _cdssResult = null;
       _geminiRecommendation = null;
       _isGeminiLoading = false;
@@ -152,21 +155,22 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
       'lab_summary': _labSummaryController.text.trim(),
     };
 
+    final input = GeneralMedicalConsultInput(
+      chiefComplaint: _complaintController.text,
+      onset: _onsetController.text,
+      symptoms: _symptomsController.text,
+      medicalHistory: _historyController.text,
+      medications: _medicationsController.text,
+      allergies: _allergiesController.text,
+      observations: observations,
+      redFlags: Set<String>.from(_selectedRedFlags),
+    );
+
     setState(() {
+      _consultationInput = input;
       _geminiRecommendation = null;
       _isGeminiLoading = false;
-      _cdssResult = GeneralMedicalConsultEngine.evaluate(
-        GeneralMedicalConsultInput(
-          chiefComplaint: _complaintController.text,
-          onset: _onsetController.text,
-          symptoms: _symptomsController.text,
-          medicalHistory: _historyController.text,
-          medications: _medicationsController.text,
-          allergies: _allergiesController.text,
-          observations: observations,
-          redFlags: Set<String>.from(_selectedRedFlags),
-        ),
-      );
+      _cdssResult = GeneralMedicalConsultEngine.evaluate(input);
     });
   }
 
@@ -285,7 +289,16 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
   }
 
   Future<void> _saveAssessment() async {
-    if (_selectedPatient == null || _cdssResult == null) return;
+    final selectedPatient = _selectedPatient;
+    final consultationInput = _consultationInput;
+    final assessment = _cdssResult;
+    if (selectedPatient == null ||
+        consultationInput == null ||
+        assessment == null) {
+      return;
+    }
+
+    final patientId = selectedPatient.patientId;
     setState(() => _isSaving = true);
 
     final client = Supabase.instance.client;
@@ -315,7 +328,7 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
     try {
       if (hasBloodPressure) {
         await client.from('vital_signs').insert({
-          'patient_id': _selectedPatient!.patientId,
+          'patient_id': patientId,
           'systolic': sbp,
           'diastolic': dbp,
           'pulse': pulse,
@@ -325,47 +338,48 @@ class _CdssDataEntryScreenState extends ConsumerState<CdssDataEntryScreen> {
 
       final inputSnapshot = {
         'consult_type': 'general_medical',
-        'chief_complaint': _complaintController.text.trim(),
-        'onset': _onsetController.text.trim(),
-        'symptoms': _symptomsController.text.trim(),
-        'medical_history': _historyController.text.trim(),
-        'medications': _medicationsController.text.trim(),
-        'allergies': _allergiesController.text.trim(),
+        'chief_complaint': consultationInput.chiefComplaint.trim(),
+        'onset': consultationInput.onset.trim(),
+        'symptoms': consultationInput.symptoms.trim(),
+        'medical_history': consultationInput.medicalHistory.trim(),
+        'medications': consultationInput.medications.trim(),
+        'allergies': consultationInput.allergies.trim(),
         'observations': observations,
-        'red_flags': _selectedRedFlags.toList(),
-        'priority': _cdssResult!.priority.name,
-        'missing_information': _cdssResult!.missingInformation,
+        'red_flags': consultationInput.redFlags.toList(),
+        'priority': assessment.priority.name,
+        'missing_information': assessment.missingInformation,
       };
 
       await client.from('cdss_events').insert({
-        'patient_id': _selectedPatient!.patientId,
+        'patient_id': patientId,
         'staff_id': user?.id,
         'staff_name': staffName,
         'rule_id': 'GENERAL-CLINICAL-CONSULT',
         'rule_version': 'GENERAL-1.0',
-        'severity': switch (_cdssResult!.priority) {
+        'severity': switch (assessment.priority) {
           ConsultPriority.emergency => 'CRITICAL',
           ConsultPriority.promptReview => 'ROUTINE',
           ConsultPriority.routineReview => 'ROUTINE',
         },
         'input_snapshot': jsonEncode(inputSnapshot),
-        'recommendation': _cdssResult!.nextSteps.join('; '),
+        'recommendation': assessment.nextSteps.join('; '),
         'staff_action': 'ACCEPTED',
         'created_at': DateTime.now().toIso8601String(),
       });
 
       await client.from('staff_notes').insert({
-        'patient_id': _selectedPatient!.patientId,
+        'patient_id': patientId,
         'staff_name': staffName,
-        'note_text': [
-          'บันทึกการปรึกษาทางการแพทย์ทั่วไป',
-          if (_complaintController.text.trim().isNotEmpty)
-            'อาการสำคัญ: ${_complaintController.text.trim()}',
-          ..._cdssResult!.nextSteps,
-        ].join(' | '),
+        'note_text': GeneralMedicalConsultEngine.formatClinicalNote(
+          input: consultationInput,
+          result: assessment,
+        ),
+        'created_at': DateTime.now().toIso8601String(),
       });
 
       ref.invalidate(triageOverviewProvider);
+      ref.invalidate(patientDetailProvider(patientId));
+      ref.invalidate(patientTimelineProvider(patientId));
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

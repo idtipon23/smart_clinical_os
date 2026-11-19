@@ -46,5 +46,25 @@ void main() {
         expect(result.safetyAlerts, isEmpty);
       },
     );
+
+    test('formats consultation details into the patient clinical note', () {
+      final consultation = input(
+        chiefComplaint: 'ปวดท้อง',
+        redFlags: {'ปวดท้องรุนแรงหรืออาการทรุดเร็ว'},
+      );
+      final result = GeneralMedicalConsultEngine.evaluate(consultation);
+
+      final note = GeneralMedicalConsultEngine.formatClinicalNote(
+        input: consultation,
+        result: result,
+      );
+
+      expect(note, contains('อาการสำคัญ: ปวดท้อง'));
+      expect(note, contains('เริ่มมีอาการ: วันนี้'));
+      expect(note, contains('รายละเอียดอาการ: ปวดท้องหลังรับประทานอาหาร'));
+      expect(note, contains('อุณหภูมิ: 37.0'));
+      expect(note, contains('อาการเตือน: ปวดท้องรุนแรงหรืออาการทรุดเร็ว'));
+      expect(note, contains('ขั้นตอนถัดไป:'));
+    });
   });
 }
