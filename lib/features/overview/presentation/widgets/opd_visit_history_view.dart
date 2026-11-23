@@ -757,9 +757,69 @@ class _OpdVisitHistoryViewState extends ConsumerState<OpdVisitHistoryView> {
               ),
             ),
           ],
+          ..._buildOrderBoxes(v),
         ],
       ),
     );
+  }
+
+  List<Widget> _buildOrderBoxes(OpdVisitModel v) {
+    Widget box(String title, List<dynamic> orders) {
+      final lines = <String>[
+        for (final o in orders)
+          if (o is Map && (o['name_th'] ?? '').toString().trim().isNotEmpty)
+            [
+              o['name_th'].toString().trim(),
+              if ((o['name_en'] ?? '').toString().trim().isNotEmpty &&
+                  o['name_en'] != o['name_th'])
+                '(${o['name_en']})',
+              if (((o['quantity'] as num?) ?? 1) > 1) '× ${o['quantity']}',
+            ].join(' '),
+      ];
+      return Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF8FAFC),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFFE2E8F0)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  color: Color(0xFF475569),
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                ),
+              ),
+              const SizedBox(height: 6),
+              for (final line in lines)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Text(
+                    '• $line',
+                    style: const TextStyle(
+                      color: ClinicalColors.deepCocoa,
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return [
+      if (v.procedures.isNotEmpty) box('หัตถการ (Procedures):', v.procedures),
+      if (v.labOrders.isNotEmpty) box('ส่งตรวจ Lab:', v.labOrders),
+      if (v.imagingOrders.isNotEmpty)
+        box('ส่งตรวจ X-ray / Imaging:', v.imagingOrders),
+    ];
   }
 
   Widget _buildEncounterClinicalResults(

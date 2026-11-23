@@ -189,6 +189,16 @@ export function normalizeClinicalContext(value, identifiers = []) {
       "new prescriptions",
       identifiers,
     ),
+    planned_procedures: normalizeStringList(
+      value.planned_procedures,
+      "planned procedures",
+      identifiers,
+    ),
+    planned_investigations: normalizeStringList(
+      value.planned_investigations,
+      "planned investigations",
+      identifiers,
+    ),
   };
 
   const totalLength = JSON.stringify(context).length;

@@ -64,7 +64,7 @@ export async function handleClinicalAiRequest(
   const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
   const apiKey = Deno.env.get("GEMINI_API_KEY");
   const configuredModel = Deno.env.get("GEMINI_MODEL")?.trim();
-  const model = configuredModel || "gemini-3.5-flash";
+  const model = configuredModel || "gemini-2.5-flash";
   if (
     !supabaseUrl ||
     !anonKey ||
@@ -128,9 +128,14 @@ export async function handleClinicalAiRequest(
             ],
             generationConfig: {
               temperature: 0.1,
-              maxOutputTokens: 1600,
+              // ภาษาไทยใช้ token เยอะ + Gemini 2.5 นับ "thinking" รวมใน
+              // maxOutputTokens ทำให้ JSON ถูกตัดกลางคัน -> parse ไม่ได้ -> 502
+              maxOutputTokens: 4096,
               responseMimeType: "application/json",
               responseSchema: options.responseSchema,
+              ...(/^gemini-2\.5-flash/.test(model)
+                ? { thinkingConfig: { thinkingBudget: 0 } }
+                : {}),
             },
           }),
           signal: controller.signal,
@@ -141,24 +146,44 @@ export async function handleClinicalAiRequest(
     }
 
     if (!geminiResponse.ok) {
-      return jsonResponse(502, { error: "Gemini ไม่สามารถประมวลผลได้ในขณะนี้" });
+      const errText = (await geminiResponse.text().catch(() => "")).slice(0, 800);
+      console.error("Gemini HTTP error", geminiResponse.status, model, errText);
+      return jsonResponse(502, {
+        error: "Gemini ไม่สามารถประมวลผลได้ในขณะนี้",
+        gemini_status: geminiResponse.status,
+      });
     }
 
     let result: unknown;
+    let responseBody: any;
     try {
-      const responseBody = await geminiResponse.json();
+      responseBody = await geminiResponse.json();
       const text = responseBody.candidates?.[0]?.content?.parts
         ?.map((part: { text?: string }) => part.text ?? "")
         .join("")
         .trim();
       if (!text) throw new Error("Empty Gemini response");
       result = options.normalizeResult(JSON.parse(text), clinicalContext);
-    } catch {
-      return jsonResponse(502, { error: "Gemini ส่งผลลัพธ์ไม่ครบหรือไม่ถูกต้อง" });
+    } catch (err) {
+      console.error(
+        "Gemini output invalid:",
+        String(err),
+        "finishReason=",
+        responseBody?.candidates?.[0]?.finishReason,
+        "blockReason=",
+        responseBody?.promptFeedback?.blockReason,
+        "usage=",
+        JSON.stringify(responseBody?.usageMetadata ?? {}),
+      );
+      return jsonResponse(502, {
+        error: "Gemini ส่งผลลัพธ์ไม่ครบหรือไม่ถูกต้อง",
+        finish_reason: responseBody?.candidates?.[0]?.finishReason ?? null,
+      });
     }
 
     return jsonResponse(200, { model, result });
-  } catch {
+  } catch (err) {
+    console.error("Unhandled edge error:", String(err));
     return jsonResponse(502, { error: "ไม่สามารถเชื่อมต่อบริการ Gemini ได้" });
   }
 }

@@ -1,19 +1,52 @@
 -- Generated from the clinic-supplied workbook. No patient data is included.
 -- Run after 20261119152000_clinic_catalogs_and_opd_orders.sql.
--- This seed refuses to assign clinic-specific prices when the project has
--- zero or multiple facilities; review facility scoping before retrying.
+--
+-- ราคา/สต็อกในไฟล์นี้เป็นของคลินิกเดียว จึงใส่ให้ facility เดียวเท่านั้น
+--   * ถ้าโปรเจกต์มี facility เดียว: ปล่อย requested_facility ว่างไว้ได้
+--   * ถ้ามีหลาย facility (หรือต้องการระบุเอง): ใส่ facility_code หรือ id
+--     ของคลินิกที่ต้องการในบรรทัด requested_facility ด้านล่าง
+--   * ถ้าระบุไม่ครบ ไฟล์จะหยุดพร้อมแสดงรายการ facility ให้เลือก
+-- รันซ้ำได้ปลอดภัย: รายการที่มีอยู่แล้ว (item_code/procedure_code เดิม) จะไม่ถูกเขียนทับ
 begin;
 do $$
 declare
+  -- >>> แก้ตรงนี้: ใส่ facility_code หรือ id ของคลินิกปลายทาง (เว้นว่างได้ถ้ามี facility เดียว)
+  requested_facility text := '';
   facility_count integer;
+  matched_count integer;
+  facility_list text;
   target_facility_id text;
 begin
   select count(*) into facility_count from public.facilities;
-  if facility_count <> 1 then
-    raise exception 'Clinic catalog seed requires exactly one facility; found %. Do not apply clinic prices to multiple facilities.', facility_count;
-  end if;
-  select id::text into target_facility_id from public.facilities limit 1;
 
+  if btrim(requested_facility) = '' then
+    if facility_count = 1 then
+      select id::text into target_facility_id from public.facilities limit 1;
+    else
+      select string_agg(
+        id::text || ' | ' || coalesce(facility_code, '-') || ' | ' || coalesce(facility_name, '-'),
+        E'\n' order by facility_code
+      ) into facility_list from public.facilities;
+      raise exception E'พบ % facility ต้องระบุคลินิกปลายทางในตัวแปร requested_facility (ใส่ facility_code หรือ id) แล้วรันใหม่\nรายการที่มี (id | code | name):\n%',
+        facility_count, coalesce(facility_list, '(ไม่มี facility เลย ให้สร้างคลินิกก่อน)');
+    end if;
+  else
+    select count(*) into matched_count
+    from public.facilities
+    where id::text = btrim(requested_facility)
+       or upper(facility_code) = upper(btrim(requested_facility));
+    if matched_count <> 1 then
+      raise exception 'requested_facility "%" ตรงกับ % รายการ (ต้องตรงกับ 1 รายการพอดี) ตรวจ facility_code/id อีกครั้ง',
+        requested_facility, matched_count;
+    end if;
+    select id::text into target_facility_id
+    from public.facilities
+    where id::text = btrim(requested_facility)
+       or upper(facility_code) = upper(btrim(requested_facility))
+    limit 1;
+  end if;
+
+  raise notice 'Seeding clinic catalog for facility id: %', target_facility_id;
   insert into public.clinic_medications (
     facility_id, item_code, generic_name, trade_name, strength, dosage_form,
     dispensing_unit, cost_price, selling_price, stock_qty, nlem_marked,

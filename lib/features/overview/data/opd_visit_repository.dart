@@ -35,6 +35,9 @@ class OpdVisitModel {
   final String? icd10Code;
   final String? treatmentPlan;
   final List<dynamic> prescriptions;
+  final List<dynamic> procedures;
+  final List<dynamic> labOrders;
+  final List<dynamic> imagingOrders;
   final String? doctorNotes;
   final String encounterStatus;
   final Map<String, dynamic>? consultationSnapshot;
@@ -70,6 +73,9 @@ class OpdVisitModel {
     this.icd10Code,
     this.treatmentPlan,
     this.prescriptions = const [],
+    this.procedures = const [],
+    this.labOrders = const [],
+    this.imagingOrders = const [],
     this.doctorNotes,
     this.encounterStatus = 'closed',
     this.consultationSnapshot,
@@ -110,6 +116,11 @@ class OpdVisitModel {
       treatmentPlan: map['treatment_plan']?.toString(),
       prescriptions: map['prescriptions'] is List
           ? map['prescriptions']
+          : const [],
+      procedures: map['procedures'] is List ? map['procedures'] : const [],
+      labOrders: map['lab_orders'] is List ? map['lab_orders'] : const [],
+      imagingOrders: map['imaging_orders'] is List
+          ? map['imaging_orders']
           : const [],
       doctorNotes: map['doctor_notes']?.toString(),
       encounterStatus: map['encounter_status']?.toString() ?? 'closed',
@@ -264,6 +275,10 @@ class OpdVisitRepository {
     String? icd10Code,
     String? treatmentPlan,
     List<Map<String, dynamic>> prescriptions = const [],
+    // null = ไม่แตะคอลัมน์ procedures เดิม (กันเขียนทับโดยไม่ตั้งใจ)
+    List<Map<String, dynamic>>? procedures,
+    List<Map<String, dynamic>>? labOrders,
+    List<Map<String, dynamic>>? imagingOrders,
     String? doctorNotes,
   }) async {
     final staffProfile = await _ref.read(currentStaffProfileProvider.future);
@@ -319,6 +334,9 @@ class OpdVisitRepository {
           ? treatmentPlan!.trim()
           : null,
       'prescriptions': prescriptions,
+      if (procedures != null) 'procedures': procedures,
+      if (labOrders != null) 'lab_orders': labOrders,
+      if (imagingOrders != null) 'imaging_orders': imagingOrders,
       'doctor_notes': doctorNotes?.trim().isNotEmpty == true
           ? doctorNotes!.trim()
           : null,

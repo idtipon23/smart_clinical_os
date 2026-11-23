@@ -124,6 +124,79 @@ class ClinicProcedure {
   }
 }
 
+class ClinicLabTest {
+  final String id;
+  final String testCode;
+  final String nameTh;
+  final String? nameEn;
+  final String? specimen;
+  final double? standardPrice;
+  final String? billingUnit;
+  final String? remarks;
+
+  const ClinicLabTest({
+    required this.id,
+    required this.testCode,
+    required this.nameTh,
+    this.nameEn,
+    this.specimen,
+    this.standardPrice,
+    this.billingUnit,
+    this.remarks,
+  });
+
+  factory ClinicLabTest.fromMap(Map<String, dynamic> map) {
+    return ClinicLabTest(
+      id: map['id']?.toString() ?? '',
+      testCode: map['test_code']?.toString() ?? '',
+      nameTh: map['name_th']?.toString() ?? '',
+      nameEn: map['name_en']?.toString(),
+      specimen: map['specimen']?.toString(),
+      standardPrice: (map['standard_price'] as num?)?.toDouble(),
+      billingUnit: map['billing_unit']?.toString(),
+      remarks: map['remarks']?.toString(),
+    );
+  }
+}
+
+class ClinicImagingTest {
+  final String id;
+  final String testCode;
+  final String nameTh;
+  final String? nameEn;
+  final String? modality;
+  final String? bodyPart;
+  final double? standardPrice;
+  final String? billingUnit;
+  final String? remarks;
+
+  const ClinicImagingTest({
+    required this.id,
+    required this.testCode,
+    required this.nameTh,
+    this.nameEn,
+    this.modality,
+    this.bodyPart,
+    this.standardPrice,
+    this.billingUnit,
+    this.remarks,
+  });
+
+  factory ClinicImagingTest.fromMap(Map<String, dynamic> map) {
+    return ClinicImagingTest(
+      id: map['id']?.toString() ?? '',
+      testCode: map['test_code']?.toString() ?? '',
+      nameTh: map['name_th']?.toString() ?? '',
+      nameEn: map['name_en']?.toString(),
+      modality: map['modality']?.toString(),
+      bodyPart: map['body_part']?.toString(),
+      standardPrice: (map['standard_price'] as num?)?.toDouble(),
+      billingUnit: map['billing_unit']?.toString(),
+      remarks: map['remarks']?.toString(),
+    );
+  }
+}
+
 final clinicCatalogRepositoryProvider = Provider<ClinicCatalogRepository>((
   ref,
 ) {
@@ -148,6 +221,18 @@ final clinicProceduresProvider = FutureProvider.autoDispose
       return ref
           .watch(clinicCatalogRepositoryProvider)
           .fetchProcedures(facilityId);
+    });
+
+final clinicLabTestsProvider = FutureProvider.autoDispose
+    .family<List<ClinicLabTest>, String>((ref, facilityId) {
+      return ref.watch(clinicCatalogRepositoryProvider).fetchLabTests(facilityId);
+    });
+
+final clinicImagingTestsProvider = FutureProvider.autoDispose
+    .family<List<ClinicImagingTest>, String>((ref, facilityId) {
+      return ref
+          .watch(clinicCatalogRepositoryProvider)
+          .fetchImagingTests(facilityId);
     });
 
 class ClinicCatalogRepository {
@@ -176,6 +261,35 @@ class ClinicCatalogRepository {
         .map(
           (row) =>
               ClinicMedication.fromMap(Map<String, dynamic>.from(row as Map)),
+        )
+        .toList();
+  }
+
+  Future<List<ClinicLabTest>> fetchLabTests(String facilityId) async {
+    final rows = await _client
+        .from('clinic_lab_tests')
+        .select()
+        .eq('facility_id', facilityId)
+        .eq('is_active', true)
+        .order('name_th');
+    return (rows as List)
+        .map(
+          (row) => ClinicLabTest.fromMap(Map<String, dynamic>.from(row as Map)),
+        )
+        .toList();
+  }
+
+  Future<List<ClinicImagingTest>> fetchImagingTests(String facilityId) async {
+    final rows = await _client
+        .from('clinic_imaging_tests')
+        .select()
+        .eq('facility_id', facilityId)
+        .eq('is_active', true)
+        .order('name_th');
+    return (rows as List)
+        .map(
+          (row) =>
+              ClinicImagingTest.fromMap(Map<String, dynamic>.from(row as Map)),
         )
         .toList();
   }

@@ -15,6 +15,8 @@ class ClinicalAiPrivacy {
     'current_medications',
     'recent_labs',
     'new_prescriptions',
+    'planned_procedures',
+    'planned_investigations',
   ];
 
   static Map<String, dynamic> sanitizeContext(

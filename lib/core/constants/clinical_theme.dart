@@ -82,7 +82,13 @@ class ClinicalTheme {
   static ThemeData get lightTheme {
     // ใช้ Inter (Google Fonts) แทนฟอนต์ default ของระบบ — ยกระดับความรู้สึก
     // "พรีเมียม" ของทั้งแอปทันทีโดยไม่ต้องแก้โค้ด UI ทีละจุด
-    final baseTextTheme = GoogleFonts.interTextTheme();
+    // Inter ไม่มีตัวอักษรไทย -> ใส่ Noto Sans Thai เป็น fallback เพื่อไม่ให้ขึ้นกล่อง
+    final baseTextTheme = GoogleFonts.interTextTheme().apply(
+      fontFamilyFallback: [
+        GoogleFonts.notoSansThai().fontFamily!,
+        'Noto Sans Thai',
+      ],
+    );
 
     return ThemeData(
       useMaterial3: true,

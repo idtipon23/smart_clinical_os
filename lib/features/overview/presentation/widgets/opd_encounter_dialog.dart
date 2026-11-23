@@ -8,6 +8,8 @@ import '../../data/clinical_entry_repository.dart';
 import '../../data/opd_visit_repository.dart';
 import '../../data/triage_repository.dart';
 import '../../../../core/widgets/resizable_clinical_dialog.dart';
+import '../../data/clinic_catalog_repository.dart';
+import 'catalog_dropdowns.dart';
 import 'medication_safety_review_dialog.dart';
 
 class OpdEncounterDialog extends ConsumerStatefulWidget {
@@ -40,6 +42,7 @@ class _OpdEncounterDialogState extends ConsumerState<OpdEncounterDialog>
   final _formKey = GlobalKey<FormState>();
   bool _isLoading = false;
   bool _isMedicationSafetyLoading = false;
+  List<Map<String, dynamic>> _procedures = [];
 
   // History Taking
   final _ccController = TextEditingController();
@@ -59,7 +62,9 @@ class _OpdEncounterDialogState extends ConsumerState<OpdEncounterDialog>
   final _dxController = TextEditingController();
   final _icd10Controller = TextEditingController();
   final _planController = TextEditingController();
-  final _rxController = TextEditingController();
+  List<Map<String, dynamic>> _rxItems = [];
+  List<Map<String, dynamic>> _labOrders = [];
+  List<Map<String, dynamic>> _imagingOrders = [];
 
   @override
   void initState() {
@@ -87,13 +92,10 @@ class _OpdEncounterDialogState extends ConsumerState<OpdEncounterDialog>
         : encounter.diagnosisText;
     _icd10Controller.text = encounter.icd10Code ?? '';
     _planController.text = encounter.treatmentPlan ?? '';
-    _rxController.text = encounter.prescriptions
-        .map((item) {
-          if (item is Map) return item['item_name']?.toString() ?? '';
-          return item.toString();
-        })
-        .where((item) => item.isNotEmpty)
-        .join('\n');
+    _rxItems = _rxItemsFromEncounter(encounter.prescriptions);
+    _procedures = _mapList(encounter.procedures);
+    _labOrders = _mapList(encounter.labOrders);
+    _imagingOrders = _mapList(encounter.imagingOrders);
   }
 
   @override
@@ -112,7 +114,6 @@ class _OpdEncounterDialogState extends ConsumerState<OpdEncounterDialog>
     _dxController.dispose();
     _icd10Controller.dispose();
     _planController.dispose();
-    _rxController.dispose();
     super.dispose();
   }
 
@@ -136,13 +137,7 @@ class _OpdEncounterDialogState extends ConsumerState<OpdEncounterDialog>
     setState(() => _isLoading = true);
 
     try {
-      final List<Map<String, dynamic>> prescriptionList = [];
-      if (_rxController.text.trim().isNotEmpty) {
-        prescriptionList.add({
-          'item_name': _rxController.text.trim(),
-          'ordered_at': DateTime.now().toIso8601String(),
-        });
-      }
+      final prescriptionList = _rxItems.map(_rxItemForSave).toList();
 
       await ref
           .read(opdVisitRepositoryProvider)
@@ -169,6 +164,9 @@ class _OpdEncounterDialogState extends ConsumerState<OpdEncounterDialog>
             icd10Code: _icd10Controller.text.trim(),
             treatmentPlan: _planController.text.trim(),
             prescriptions: prescriptionList,
+            procedures: _procedures,
+            labOrders: _labOrders,
+            imagingOrders: _imagingOrders,
           );
 
       if (mounted) {
@@ -196,13 +194,15 @@ class _OpdEncounterDialogState extends ConsumerState<OpdEncounterDialog>
     _phController.text,
     _allergyController.text,
     _dxController.text,
-    _rxController.text,
+    _rxItems.map(_rxAiLine).join('\u0001'),
+    _procedures.map(_orderAiName).join('\u0001'),
+    _labOrders.map(_orderAiName).join('\u0001'),
+    _imagingOrders.map(_orderAiName).join('\u0001'),
   ].join('\u0000');
 
   Future<void> _requestMedicationSafetyReview() async {
     if (_isMedicationSafetyLoading || _isLoading) return;
-    if (_dxController.text.trim().isEmpty ||
-        _rxController.text.trim().isEmpty) {
+    if (_dxController.text.trim().isEmpty || _rxItems.isEmpty) {
       _tabController.animateTo(2);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('กรุณาระบุ Diagnosis และรายการยาก่อน')),
@@ -217,7 +217,8 @@ class _OpdEncounterDialogState extends ConsumerState<OpdEncounterDialog>
         title: const Text('ตรวจทานความปลอดภัยของยา (AI)'),
         content: const Text(
           'เมื่อยืนยัน ระบบจะส่งเฉพาะอายุ เพศ สัญญาณชีพ อาการ โรคร่วม '
-          'ประวัติแพ้ยา ยาปัจจุบัน ผลแล็บที่ผูกกับ Encounter และรายการยาใหม่ '
+          'ประวัติแพ้ยา ยาปัจจุบัน ผลแล็บที่ผูกกับ Encounter รายการยาใหม่ '
+          'หัตถการ และรายการตรวจที่วางแผนไว้ (เฉพาะชื่อรายการ ไม่รวมราคา) '
           'ผ่าน Supabase Edge Function ไปยัง Google Gemini API โดยลบข้อมูลระบุตัวตน '
           'จากประวัติผู้ป่วยและตรวจจับรูปแบบทั่วไป ไม่ส่งภาพตรวจ '
           'อย่างไรก็ตาม ระบบอาจตรวจไม่พบชื่อหรือที่อยู่ที่พิมพ์ปะปนในข้อความอิสระ '
@@ -400,11 +401,18 @@ class _OpdEncounterDialogState extends ConsumerState<OpdEncounterDialog>
         ],
         'current_medications': currentMedications,
         'recent_labs': recentLabs,
-        'new_prescriptions': _rxController.text
-            .split(RegExp(r'[\n;]+'))
-            .map((item) => item.trim())
-            .where((item) => item.isNotEmpty)
+        'new_prescriptions': _rxItems
+            .map(_rxAiLine)
+            .where((line) => line.isNotEmpty)
             .toList(),
+        'planned_procedures': _procedures
+            .map(_orderAiName)
+            .where((line) => line.isNotEmpty)
+            .toList(),
+        'planned_investigations': [
+          ..._labOrders.map((o) => 'Lab: ${_orderAiName(o)}'),
+          ..._imagingOrders.map((o) => 'Imaging: ${_orderAiName(o)}'),
+        ],
       };
       final identifiers = [
         widget.patientId,
@@ -825,13 +833,8 @@ class _OpdEncounterDialogState extends ConsumerState<OpdEncounterDialog>
             ],
           ),
           const SizedBox(height: 16),
-          _buildField(
-            label: 'รายการยาที่สั่งจ่าย (Prescription / Rx)',
-            controller: _rxController,
-            hint: 'เช่น Amlodipine (5mg) 1 tab po od pc เช้า #30\nMetformin (500mg) 1 tab po bid pc เช้า-เย็น #60',
-            maxLines: 3,
-          ),
-          const SizedBox(height: 16),
+          _buildRxSection(),
+          const SizedBox(height: 8),
           OutlinedButton.icon(
             onPressed: _isLoading || _isMedicationSafetyLoading
                 ? null
@@ -850,6 +853,12 @@ class _OpdEncounterDialogState extends ConsumerState<OpdEncounterDialog>
             ),
           ),
           const SizedBox(height: 16),
+          _buildProceduresSection(),
+          const SizedBox(height: 16),
+          _buildLabSection(),
+          const SizedBox(height: 16),
+          _buildImagingSection(),
+          const SizedBox(height: 16),
           _buildField(
             label: 'แผนการดูแลและคำแนะนำผู้ป่วย (Treatment Plan & Advice)',
             controller: _planController,
@@ -860,6 +869,533 @@ class _OpdEncounterDialogState extends ConsumerState<OpdEncounterDialog>
       ),
     );
   }
+
+  // ===================== catalog / order helpers =====================
+
+  AsyncValue<List<T>> _catalog<T>(
+    AsyncValue<List<T>> Function(String facilityId) select,
+  ) {
+    final facility = ref.watch(currentClinicFacilityIdProvider);
+    return facility.when(
+      data: select,
+      loading: () => AsyncLoading<List<T>>(),
+      error: (error, stack) => AsyncError<List<T>>(error, stack),
+    );
+  }
+
+  static int _uidCounter = 0;
+  static String _newUid() =>
+      '${DateTime.now().microsecondsSinceEpoch}-${_uidCounter++}';
+
+  static List<Map<String, dynamic>> _mapList(List<dynamic> raw) => raw
+      .whereType<Map>()
+      .map((item) => Map<String, dynamic>.from(item))
+      .toList();
+
+  Map<String, dynamic> _manualRxItem(String name, {bool legacy = false}) => {
+    'uid': _newUid(),
+    'source': 'manual',
+    'generic_name': name,
+    'quantity': legacy ? null : 1,
+    'sig': '',
+  };
+
+  List<Map<String, dynamic>> _rxItemsFromEncounter(List<dynamic> raw) {
+    final result = <Map<String, dynamic>>[];
+    for (final entry in raw) {
+      if (entry is Map) {
+        final item = Map<String, dynamic>.from(entry);
+        if (item.containsKey('source') || item.containsKey('generic_name')) {
+          item['uid'] = _newUid();
+          result.add(item);
+          continue;
+        }
+        // รูปแบบเดิม: ข้อความอิสระหลายบรรทัดใน item_name
+        final text = item['item_name']?.toString() ?? '';
+        for (final line in text.split('\n')) {
+          if (line.trim().isNotEmpty) {
+            result.add(_manualRxItem(line.trim(), legacy: true));
+          }
+        }
+      } else if (entry.toString().trim().isNotEmpty) {
+        result.add(_manualRxItem(entry.toString().trim(), legacy: true));
+      }
+    }
+    return result;
+  }
+
+  String _text(Object? value) => (value ?? '').toString().trim();
+
+  String _qtyText(Object? quantity) {
+    final n = num.tryParse('${quantity ?? ''}');
+    if (n == null) return '';
+    return n == n.roundToDouble() ? n.toInt().toString() : n.toString();
+  }
+
+  String _rxName(Map<String, dynamic> item) {
+    final strength = _text(item['strength']);
+    final form = _text(item['dosage_form']);
+    return [
+      _text(item['generic_name']),
+      if (strength.isNotEmpty) '($strength)',
+      if (form.isNotEmpty) form,
+    ].join(' ');
+  }
+
+  /// ข้อความที่เก็บใน item_name (หน้าประวัติและใบพิมพ์อ่านฟิลด์นี้)
+  String _rxDisplayLine(Map<String, dynamic> item) {
+    final sig = _text(item['sig']);
+    final qty = _qtyText(item['quantity']);
+    final unit = _text(item['dispensing_unit']);
+    return [
+      _rxName(item),
+      if (sig.isNotEmpty) '— $sig',
+      if (qty.isNotEmpty) '#$qty${unit.isNotEmpty ? ' $unit' : ''}',
+    ].join(' ');
+  }
+
+  /// ข้อความที่ส่งให้ AI: ไม่มีราคา/รหัสภายใน
+  String _rxAiLine(Map<String, dynamic> item) {
+    final group = _text(item['allergen_group']);
+    final sig = _text(item['sig']);
+    final qty = _qtyText(item['quantity']);
+    final unit = _text(item['dispensing_unit']);
+    return [
+      _rxName(item),
+      if (group.isNotEmpty) '[กลุ่มยา: $group]',
+      if (sig.isNotEmpty) '| $sig',
+      if (qty.isNotEmpty) '| จำนวน $qty${unit.isNotEmpty ? ' $unit' : ''}',
+    ].join(' ').trim();
+  }
+
+  Map<String, dynamic> _rxItemForSave(Map<String, dynamic> item) {
+    final copy = Map<String, dynamic>.from(item)
+      ..remove('uid')
+      ..remove('sig_rev');
+    copy['item_name'] = _rxDisplayLine(item);
+    copy['quantity'] = num.tryParse('${item['quantity']}');
+    copy['ordered_at'] ??= DateTime.now().toIso8601String();
+    return copy;
+  }
+
+  String _orderAiName(Map<String, dynamic> order) {
+    final th = _text(order['name_th']);
+    final en = _text(order['name_en']);
+    return [th, if (en.isNotEmpty && en != th) '($en)'].join(' ');
+  }
+
+  double _ordersTotal(List<Map<String, dynamic>> orders) =>
+      orders.fold<double>(0, (sum, order) {
+        final price = (order['unit_price'] as num?)?.toDouble() ?? 0;
+        final qty = (order['quantity'] as num?)?.toInt() ?? 1;
+        return sum + price * qty;
+      });
+
+  void _addOrder(
+    List<Map<String, dynamic>> list,
+    Map<String, dynamic> item, {
+    required String codeKey,
+    bool allowRepeat = false,
+  }) {
+    final index = list.indexWhere(
+      (e) => item[codeKey] != null
+          ? e[codeKey] == item[codeKey]
+          : e['name_th'] == item['name_th'],
+    );
+    if (index >= 0) {
+      if (allowRepeat) {
+        final qty = (list[index]['quantity'] as num?)?.toInt() ?? 1;
+        setState(() => list[index] = {...list[index], 'quantity': qty + 1});
+      } else {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('มีรายการนี้แล้ว')));
+      }
+      return;
+    }
+    setState(() => list.add(item));
+  }
+
+  Future<void> _addManualOrder(
+    List<Map<String, dynamic>> list, {
+    required String title,
+    required String codeKey,
+    bool allowRepeat = false,
+  }) async {
+    final name = await showManualEntryDialog(
+      context,
+      title: title,
+      label: 'ชื่อรายการ',
+    );
+    if (name == null || !mounted) return;
+    _addOrder(
+      list,
+      {
+        'source': 'manual',
+        codeKey: null,
+        'name_th': name,
+        'unit_price': null,
+        'quantity': 1,
+        'ordered_at': DateTime.now().toIso8601String(),
+      },
+      codeKey: codeKey,
+      allowRepeat: allowRepeat,
+    );
+  }
+
+  // ===================== Rx (drop-down) =====================
+
+  static const _sigPresets = [
+    'วันละ 1 ครั้ง หลังอาหารเช้า',
+    'วันละ 2 ครั้ง หลังอาหารเช้า-เย็น',
+    'วันละ 3 ครั้ง หลังอาหาร เช้า-กลางวัน-เย็น',
+    'วันละ 3 ครั้ง ก่อนอาหาร',
+    'วันละ 1 ครั้ง ก่อนนอน',
+    'เมื่อมีอาการ ทุก 4-6 ชั่วโมง',
+    'ใช้ภายนอก ทาบริเวณที่เป็น วันละ 2 ครั้ง',
+  ];
+
+  void _addRxFromCatalog(ClinicMedication med) {
+    if (_rxItems.any((e) => e['item_code'] == med.itemCode)) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('มียานี้ในรายการแล้ว')));
+      return;
+    }
+    setState(
+      () => _rxItems.add({
+        'uid': _newUid(),
+        'source': 'catalog',
+        'item_code': med.itemCode,
+        'generic_name': med.genericName,
+        'trade_name': med.tradeName,
+        'strength': med.strength,
+        'dosage_form': med.dosageForm,
+        'dispensing_unit': med.dispensingUnit,
+        'unit_price': med.sellingPrice,
+        'allergen_group': med.allergenGroup,
+        'quantity': 1,
+        'sig': '',
+      }),
+    );
+  }
+
+  Future<void> _addManualRx() async {
+    final name = await showManualEntryDialog(
+      context,
+      title: 'เพิ่มยานอกรายการคลินิก',
+      label: 'ชื่อยา ความแรง รูปแบบ',
+    );
+    if (name == null || !mounted) return;
+    setState(() => _rxItems.add(_manualRxItem(name)));
+  }
+
+  Widget _buildRxSection() {
+    final meds = _catalog<ClinicMedication>(
+      (id) => ref.watch(clinicMedicationsProvider(id)),
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'รายการยาที่สั่งจ่าย (Prescription / Rx)',
+          style: TextStyle(fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(height: 8),
+        CatalogDropdown<ClinicMedication>(
+          hint: 'เลือกยาจากรายการคลินิก (พิมพ์เพื่อค้นหา)',
+          emptyMessage: 'ยังไม่มีรายการยาของคลินิก (ตรวจว่ารัน seed แล้ว)',
+          items: meds,
+          labelOf: (m) =>
+              m.stockQty <= 0 ? '${m.displayName} (สต็อกหมด)' : m.displayName,
+          onSelected: _addRxFromCatalog,
+        ),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            onPressed: _isLoading ? null : _addManualRx,
+            icon: const Icon(Icons.edit_outlined, size: 18),
+            label: const Text('พิมพ์เพิ่มยานอกรายการ'),
+          ),
+        ),
+        if (_rxItems.isEmpty)
+          const Text(
+            'ยังไม่มีรายการยา',
+            style: TextStyle(color: Colors.black54, fontSize: 13),
+          )
+        else
+          for (final item in _rxItems) _buildRxRow(item),
+      ],
+    );
+  }
+
+  Widget _buildRxRow(Map<String, dynamic> item) {
+    final uid = item['uid'].toString();
+    final price = (item['unit_price'] as num?)?.toDouble();
+    final trade = _text(item['trade_name']);
+    final unit = _text(item['dispensing_unit']);
+    final info = [
+      if (trade.isNotEmpty) trade,
+      if (price != null) '฿${formatBaht(price)}${unit.isNotEmpty ? ' / $unit' : ''}',
+      if (item['source'] == 'manual') 'ยานอกรายการ',
+    ].join(' · ');
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    _rxName(item),
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'ลบ',
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: () => setState(
+                    () => _rxItems.removeWhere((e) => e['uid'] == item['uid']),
+                  ),
+                ),
+              ],
+            ),
+            if (info.isNotEmpty)
+              Text(
+                info,
+                style: const TextStyle(color: Colors.black54, fontSize: 12),
+              ),
+            const SizedBox(height: 8),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: 100,
+                  child: TextFormField(
+                    key: ValueKey('$uid-qty'),
+                    initialValue: _qtyText(item['quantity']),
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: InputDecoration(
+                      labelText: 'จำนวน',
+                      suffixText: unit,
+                      isDense: true,
+                    ),
+                    onChanged: (v) => item['quantity'] = num.tryParse(v.trim()),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: TextFormField(
+                    key: ValueKey('$uid-sig-${item['sig_rev'] ?? 0}'),
+                    initialValue: _text(item['sig']),
+                    decoration: InputDecoration(
+                      labelText: 'วิธีใช้ (Sig)',
+                      isDense: true,
+                      suffixIcon: PopupMenuButton<String>(
+                        tooltip: 'เลือกวิธีใช้สำเร็จรูป',
+                        icon: const Icon(Icons.arrow_drop_down),
+                        onSelected: (value) => setState(() {
+                          item['sig'] = value;
+                          item['sig_rev'] = ((item['sig_rev'] as int?) ?? 0) + 1;
+                        }),
+                        itemBuilder: (context) => [
+                          for (final preset in _sigPresets)
+                            PopupMenuItem<String>(
+                              value: preset,
+                              child: Text(preset),
+                            ),
+                        ],
+                      ),
+                    ),
+                    onChanged: (v) => item['sig'] = v,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ===================== procedures / lab / imaging =====================
+
+  Widget _buildOrderSection<T>({
+    required String title,
+    required String hint,
+    required String emptyMessage,
+    required String manualLabel,
+    required AsyncValue<List<T>> catalog,
+    required String Function(T item) labelOf,
+    required void Function(T item) onSelected,
+    required VoidCallback onManual,
+    required List<Map<String, dynamic>> orders,
+  }) {
+    final total = _ordersTotal(orders);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 8),
+        CatalogDropdown<T>(
+          hint: hint,
+          emptyMessage: emptyMessage,
+          items: catalog,
+          labelOf: labelOf,
+          onSelected: onSelected,
+        ),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            onPressed: _isLoading ? null : onManual,
+            icon: const Icon(Icons.edit_outlined, size: 18),
+            label: Text(manualLabel),
+          ),
+        ),
+        if (orders.isEmpty)
+          const Text(
+            'ยังไม่มีรายการ',
+            style: TextStyle(color: Colors.black54, fontSize: 13),
+          )
+        else ...[
+          for (var i = 0; i < orders.length; i++)
+            ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: Text(_orderAiName(orders[i])),
+              subtitle: Text(
+                [
+                  if (orders[i]['unit_price'] != null)
+                    '฿${formatBaht((orders[i]['unit_price'] as num?)?.toDouble())}'
+                        ' × ${(orders[i]['quantity'] as num?)?.toInt() ?? 1}',
+                  if (orders[i]['source'] == 'manual') 'นอกรายการ',
+                ].join(' · '),
+              ),
+              trailing: IconButton(
+                icon: const Icon(Icons.delete_outline),
+                onPressed: () => setState(() => orders.removeAt(i)),
+              ),
+            ),
+          if (total > 0)
+            Align(
+              alignment: Alignment.centerRight,
+              child: Text(
+                'รวม ฿${formatBaht(total)}',
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildProceduresSection() => _buildOrderSection<ClinicProcedure>(
+    title: 'หัตถการ (Procedures)',
+    hint: 'เลือกหัตถการ (พิมพ์เพื่อค้นหา)',
+    emptyMessage: 'ยังไม่มีรายการหัตถการของคลินิก',
+    manualLabel: 'พิมพ์เพิ่มหัตถการนอกรายการ',
+    catalog: _catalog<ClinicProcedure>(
+      (id) => ref.watch(clinicProceduresProvider(id)),
+    ),
+    labelOf: (p) => _text(p.nameEn).isNotEmpty
+        ? '${p.nameTh} — ${p.nameEn}'
+        : p.nameTh,
+    onSelected: (p) => _addOrder(
+      _procedures,
+      {
+        'source': 'catalog',
+        'procedure_code': p.procedureCode,
+        'name_th': p.nameTh,
+        'name_en': p.nameEn,
+        'unit_price': p.standardPrice,
+        'billing_unit': p.billingUnit,
+        'quantity': 1,
+        'ordered_at': DateTime.now().toIso8601String(),
+      },
+      codeKey: 'procedure_code',
+      allowRepeat: true,
+    ),
+    onManual: () => _addManualOrder(
+      _procedures,
+      title: 'เพิ่มหัตถการนอกรายการ',
+      codeKey: 'procedure_code',
+      allowRepeat: true,
+    ),
+    orders: _procedures,
+  );
+
+  Widget _buildLabSection() => _buildOrderSection<ClinicLabTest>(
+    title: 'ส่งตรวจทางห้องปฏิบัติการ (Lab)',
+    hint: 'เลือกรายการ Lab (พิมพ์เพื่อค้นหา)',
+    emptyMessage: 'ยังไม่มีรายการ Lab ของคลินิก (รอเพิ่มข้อมูล) — พิมพ์เพิ่มเองได้',
+    manualLabel: 'พิมพ์เพิ่มรายการ Lab',
+    catalog: _catalog<ClinicLabTest>(
+      (id) => ref.watch(clinicLabTestsProvider(id)),
+    ),
+    labelOf: (l) =>
+        _text(l.nameEn).isNotEmpty ? '${l.nameTh} — ${l.nameEn}' : l.nameTh,
+    onSelected: (l) => _addOrder(
+      _labOrders,
+      {
+        'source': 'catalog',
+        'test_code': l.testCode,
+        'name_th': l.nameTh,
+        'name_en': l.nameEn,
+        'specimen': l.specimen,
+        'unit_price': l.standardPrice,
+        'billing_unit': l.billingUnit,
+        'quantity': 1,
+        'ordered_at': DateTime.now().toIso8601String(),
+      },
+      codeKey: 'test_code',
+    ),
+    onManual: () => _addManualOrder(
+      _labOrders,
+      title: 'เพิ่มรายการ Lab นอกรายการ',
+      codeKey: 'test_code',
+    ),
+    orders: _labOrders,
+  );
+
+  Widget _buildImagingSection() => _buildOrderSection<ClinicImagingTest>(
+    title: 'ส่งตรวจภาพถ่ายรังสี (X-ray / Imaging)',
+    hint: 'เลือกรายการ X-ray (พิมพ์เพื่อค้นหา)',
+    emptyMessage:
+        'ยังไม่มีรายการ X-ray ของคลินิก (รอเพิ่มข้อมูล) — พิมพ์เพิ่มเองได้',
+    manualLabel: 'พิมพ์เพิ่มรายการ X-ray',
+    catalog: _catalog<ClinicImagingTest>(
+      (id) => ref.watch(clinicImagingTestsProvider(id)),
+    ),
+    labelOf: (x) =>
+        _text(x.nameEn).isNotEmpty ? '${x.nameTh} — ${x.nameEn}' : x.nameTh,
+    onSelected: (x) => _addOrder(
+      _imagingOrders,
+      {
+        'source': 'catalog',
+        'test_code': x.testCode,
+        'name_th': x.nameTh,
+        'name_en': x.nameEn,
+        'modality': x.modality,
+        'body_part': x.bodyPart,
+        'unit_price': x.standardPrice,
+        'billing_unit': x.billingUnit,
+        'quantity': 1,
+        'ordered_at': DateTime.now().toIso8601String(),
+      },
+      codeKey: 'test_code',
+    ),
+    onManual: () => _addManualOrder(
+      _imagingOrders,
+      title: 'เพิ่มรายการ X-ray นอกรายการ',
+      codeKey: 'test_code',
+    ),
+    orders: _imagingOrders,
+  );
 
   Widget _buildField({
     required String label,
