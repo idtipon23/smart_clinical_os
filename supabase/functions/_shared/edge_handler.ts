@@ -64,7 +64,7 @@ export async function handleClinicalAiRequest(
   const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
   const apiKey = Deno.env.get("GEMINI_API_KEY");
   const configuredModel = Deno.env.get("GEMINI_MODEL")?.trim();
-  const model = configuredModel || "gemini-2.5-flash";
+  const model = configuredModel || "gemini-3.5-flash";
   if (
     !supabaseUrl ||
     !anonKey ||
